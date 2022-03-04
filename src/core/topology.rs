@@ -20,6 +20,31 @@
 
 //! Mixnet topology interface.
 
+
+// TODO layered topo with fix number of nodes, and elections??
+// possibly with multiple node being able to act in a same slot: can even double the header size for
+// it??
+//
+// TODO for layer, we define pool, and we like the fact that layers got a good connection between
+// themselves.
+// It also allow to think of mechanism to try to avoid peers being in multiple layers (same as
+// avoid multiple peers on network): could use some staking/locking token.
+// Should use some trust building token.
+// Generally multiple system between layer.
+// Actually none of this seems good.
+// Could also keep a full pool layer: alas pool is biased too.
+//
+// TODO could each layer/group have multiple next layer possibility. Not trying to be acyclic, when
+// creating the message we ensure no layer got queried twice.
+//
+// TODO topology only really help produce valid and resistant path.
+// Peers are allowed to block message if they don't respect topology (they can always do but here
+// they are expected too).
+//
+// TODO generaly group/layer should publish their rules.
+//
+// TODO does not work well as cover message needs to follow a unique scheme that the users want to
+// follow too.
 use crate::core::{MixPeerId, MixPublicKey};
 
 /// Provide network topology information to the mixnet.

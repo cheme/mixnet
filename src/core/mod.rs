@@ -221,6 +221,8 @@ impl Mixnet {
 				.map(|(id, key)| sphinx::PathHop {
 					id: to_sphinx_id(id).unwrap(),
 					public_key: (*key).into(),
+					// TODO no need for delay on other peers than the first one.
+					// actually should be local to each peer? TODO just remove this field.
 					delay: Some(exp_delay(&mut rng, self.average_hop_delay).as_millis() as u32),
 				})
 				.collect();
@@ -230,6 +232,7 @@ impl Mixnet {
 		}
 
 		for (peer_id, packet) in packets {
+			// TODO here is delay.
 			let delay = exp_delay(&mut rng, self.average_hop_delay);
 			self.queue_packet(peer_id, packet, delay)?;
 		}
@@ -281,9 +284,24 @@ impl Mixnet {
 		self.connected_peers.remove(id);
 	}
 
+	// TODO have a pool of cover_message (creating is costy)
+	// with invalidate -> pool could be part of the mix. Issue is
+	// deal with disconnected node... -> we got info of first hop, which
+	// is statistically fine (as long as nodes cannot distinguish if they are first).
+	// -> actually untrue, we need feedback from the node of following hop.
+	//
+	// TODO actually using an actual mix feels a bit like a lack of protocol trust.
+	// delay do provide mixing, but I guess not enough if all delay are calculated
+	// similarily, so pooling, mixing still sounds ok to me.
 	fn cover_message(&mut self) -> Option<(MixPeerId, Vec<u8>)> {
 		let mut rng = rand::thread_rng();
 		let message = fragment::create_cover_fragment(&mut rng);
+		// TODO cover should be on multiple path otherwhise mix node can distinguish
+		// from standard message statistically.
+		// TODO actually this does not work without a topology: so we do random length
+		// in this case!!! TODO actually should do something that takes account of
+		// message average loss.
+		// TODO we need to product our view of the network loss (require unimplemented feedback).
 		let (id, key) = self.random_cover_path()?;
 
 		let hop =
@@ -304,6 +322,7 @@ impl Mixnet {
 
 		if self.topology.is_none() {
 			// No topology is defined. Check if direct connection is possible.
+			// TODO this is ok as long as we do for cover message too.
 			match self.connected_peers.get(recipient) {
 				Some(key) if count == 1 => return Ok(vec![vec![(recipient.clone(), key.clone())]]),
 				_ => return Err(Error::NoPath(Some(recipient.clone()))),
