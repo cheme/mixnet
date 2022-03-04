@@ -123,13 +123,26 @@ pub fn hkdf_expand(prk: &[u8], info: &[u8]) -> [u8; KDF_OUTPUT_SIZE] {
 pub fn hmac_list(key: &[u8; MAC_KEY_SIZE], data: &[&[u8]]) -> [u8; MAC_SIZE] {
 	type HmacSha256 = Hmac<Sha256>;
 	let mut mac = HmacSha256::new_from_slice(key).unwrap();
-	for d in data {
+	for d in data { // TODO should be same len buffer??: timing attack on padding here?
 		mac.update(d);
 	}
 	let mut output = [0u8; MAC_SIZE];
 	output.copy_from_slice(&mac.finalize().into_bytes()[..MAC_SIZE]);
 	output
 }
+pub fn hmac_cat(key: &[u8; MAC_KEY_SIZE], data: &[&[u8]]) -> [u8; MAC_SIZE] {
+	let mut datacat = Vec::new();
+	for d in data { // TODO should be same len buffer??: timing attack on padding here?
+	datacat.extend(*d);
+	}
+	type HmacSha256 = Hmac<Sha256>;
+	let mut mac = HmacSha256::new_from_slice(key).unwrap();
+	mac.update(datacat.as_slice());
+	let mut output = [0u8; MAC_SIZE];
+	output.copy_from_slice(&mac.finalize().into_bytes()[..MAC_SIZE]);
+	output
+}
+
 
 /// returns the plaintext of the message msg, decrypted via the
 /// Sphinx SPRP with a given key.

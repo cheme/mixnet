@@ -223,7 +223,7 @@ fn create_header<T: Rng + CryptoRng>(
 		lioness::xor_assign(hop_slice, ri_keystream[hop_index].as_slice());
 		let padding = if hop_index > 0 { ri_padding[hop_index - 1].as_slice() } else { &[] };
 		let mac_data = [&group_elements[hop_index].as_bytes()[..], hop_slice, padding];
-		mac = crypto::hmac_list(&keys[hop_index].header_mac, &mac_data);
+		mac = crypto::hmac_cat(&keys[hop_index].header_mac, &mac_data);
 
 		if hop_index == 0 {
 			break
@@ -300,7 +300,7 @@ pub fn unwrap_packet(private_key: &StaticSecret, mut packet: Vec<u8>) -> Result<
 	// Validate the Sphinx Packet Header.
 	let mac_key = keys.header_mac;
 	let mac_data = [&group_element_bytes[..], routing_info];
-	let calculated_mac = crypto::hmac_list(&mac_key, &mac_data);
+	let calculated_mac = crypto::hmac_cat(&mac_key, &mac_data);
 
 	// compare MAC in constant time
 	if calculated_mac.ct_eq(header_mac).unwrap_u8() == 0 {
