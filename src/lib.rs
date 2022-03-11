@@ -18,6 +18,15 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+
+// TODO surbs: 
+// - add surbs id to header: on receive if there is a surbs id, lookup in persistence, run n registered hop encode
+// -> need a tag as receiving
+// -> need a tag as message start by subs
+// - surbs are just stored in message in first position and decode: surbsheader, first decode key,
+// first hop address : in reverse order.
+// Thats all
+
 #[macro_use]
 extern crate arrayref;
 
