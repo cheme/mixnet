@@ -22,7 +22,7 @@
 
 use crate::network::{protocol, WorkerSink};
 use futures::{future::BoxFuture, prelude::*};
-use libp2p_core::{upgrade::NegotiationError, UpgradeError};
+use libp2p_core::{upgrade::NegotiationError, UpgradeError, connection::ConnectionId};
 use libp2p_swarm::{
 	ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive,
 	NegotiatedSubstream, SubstreamProtocol,
@@ -103,6 +103,13 @@ pub struct Handler {
 	/// substream, this is always a future that waits for the
 	/// next inbound message.
 	inbound: Option<MessageFuture>,
+
+	/// Inbound stream.
+	inbound2: Option<NegotiatedSubstream>,
+	/// Outbound sink.
+	outbound2: Option<NegotiatedSubstream>,
+
+	peer_id: Option<(MixPeerId, ConnectionId)>,
 	/// Tracks the state of our handler.
 	state: State,
 	pending_message: Option<Message>,
@@ -131,6 +138,9 @@ impl Handler {
 			pending_errors: VecDeque::with_capacity(2),
 			outbound: None,
 			inbound: None,
+			outbound2: None,
+			inbound2: None,
+			peer_id: None,
 			state: State::Active,
 			pending_message: None,
 			mixnet_worker_sink: Pin::new(mixnet_worker_sink),
@@ -138,8 +148,34 @@ impl Handler {
 	}
 }
 
+impl Handler {
+	fn check_connected(&mut self) {
+		if self.inbound2.is_some() && self.outbound2.is_some() && self.peer_id.is_some() {
+			match (self.inbound2.take(), self.outbound2.take(), self.peer_id.clone().take()) {
+				(Some(inbound), Some(outbound), Some((peer, con_id))) => {
+					if let Err(e) = self
+						.mixnet_worker_sink
+						.as_mut()
+						.start_send(WorkerIn::AddConnectedInbound(peer.clone(), con_id.clone(), inbound))
+					{
+						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
+					}
+					if let Err(e) = self
+						.mixnet_worker_sink
+						.as_mut()
+						.start_send(WorkerIn::AddConnectedOutbound(peer, con_id, outbound))
+					{
+						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
+					}
+				},
+				_ => (),
+			}
+		}
+	}
+}
+
 impl ConnectionHandler for Handler {
-	type InEvent = Message;
+	type InEvent = (MixPeerId, ConnectionId);
 	type OutEvent = crate::network::Result;
 	type Error = Failure;
 	type InboundProtocol = protocol::Mixnet;
@@ -151,55 +187,20 @@ impl ConnectionHandler for Handler {
 		SubstreamProtocol::new(protocol::Mixnet, ())
 	}
 
-	fn inject_fully_negotiated_inbound(&mut self, (stream, peer_id): (NegotiatedSubstream, MixPeerId), _: ()) {
-		if let Err(e) = self
-						.mixnet_worker_sink
-						.as_mut()
-						.start_send(WorkerIn::AddConnectedInbound(peer_id, stream))
-					{
-						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
-					}
+	fn inject_fully_negotiated_inbound(&mut self, stream: NegotiatedSubstream, _: ()) {
+		self.inbound2 = Some(stream);
+		self.check_connected();
 	}
 
 	fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
-		if let Some(message) = self.pending_message.take() {
-			let Message(message) = message;
-			let stream = protocol::send_message(stream, message).boxed();
-			self.outbound = Some(ProtocolState::Sending(stream));
-		} else {
-			self.outbound = Some(ProtocolState::Idle(stream));
-		}
+		self.outbound2 = Some(stream);
+		self.outbound = Some(ProtocolState::Connected);
+		self.check_connected();
 	}
 
-	fn inject_event(&mut self, message: Message) {
-		// Send an outbound message.
-		match self.outbound.take() {
-			Some(ProtocolState::Idle(stream)) => {
-				let Message(message) = message;
-				let stream = protocol::send_message(stream, message).boxed();
-				self.outbound = Some(ProtocolState::Sending(stream));
-			},
-			Some(ProtocolState::OpenStream) => {
-				self.outbound = Some(ProtocolState::OpenStream);
-				if self.pending_message.is_some() {
-					log::warn!(target: "mixnet", "Dropped message, opening stream");
-				} else {
-					self.pending_message = Some(message);
-				}
-			},
-			Some(ProtocolState::Sending(stream)) => {
-				self.outbound = Some(ProtocolState::Sending(stream));
-				// TODO ask ark if this should not buff (or safeguard ??).
-				log::warn!(target: "mixnet", "Dropped message, already sending");
-			},
-			Some(ProtocolState::Connected) => (),
-			None =>
-				if self.pending_message.is_some() {
-					log::warn!(target: "mixnet", "Dropped message");
-				} else {
-					self.pending_message = Some(message);
-				},
-		}
+	fn inject_event(&mut self, peer: (MixPeerId, ConnectionId)) {
+		self.peer_id = Some(peer);
+		self.check_connected();
 	}
 
 	fn inject_dial_upgrade_error(&mut self, _info: (), error: ConnectionHandlerUpgrErr<Void>) {
@@ -264,7 +265,7 @@ impl ConnectionHandler for Handler {
 			}
 
 			// Continue outbound messages.
-			match self.outbound.take() {
+			match self.outbound.take() { // TODO just conn negotiation
 				Some(ProtocolState::Idle(stream)) => {
 					self.outbound = Some(ProtocolState::Idle(stream));
 					break
@@ -286,7 +287,9 @@ impl ConnectionHandler for Handler {
 						self.pending_errors.push_front(Failure::Other { error: Box::new(e) });
 					},
 				},
-				Some(ProtocolState::Connected) => (),
+				Some(ProtocolState::Connected) => {
+					self.outbound = Some(ProtocolState::Connected);
+				},
 				None => {
 					self.outbound = Some(ProtocolState::OpenStream);
 					let protocol = SubstreamProtocol::new(protocol::Mixnet, ())

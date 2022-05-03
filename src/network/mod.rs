@@ -363,8 +363,9 @@ impl NetworkBehaviour for MixnetBehaviour {
 				return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
 					peer_id: id,
 					handler: NotifyHandler::One(connection.id),
-					event: Message(self.handshake_message()),
+					event: (id, connection.id),
 				})
+				/* TODO worker to send actual handshake*/
 			}
 		}
 
@@ -374,13 +375,14 @@ impl NetworkBehaviour for MixnetBehaviour {
 		match self.mixnet_worker_stream.as_mut().poll_next(cx) {
 			Poll::Ready(Some(out)) => match out {
 				WorkerOut::Event(MixEvent::SendMessage((recipient, data))) => {
-					if let Some(connection) = self.connected.get(&recipient) {
+					/* TODO have it from worker */
+/*					if let Some(connection) = self.connected.get(&recipient) {
 						return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
 							peer_id: recipient,
 							handler: NotifyHandler::One(connection.id),
 							event: Message(data),
 						})
-					}
+					}*/
 				},
 				WorkerOut::Event(MixEvent::ChangeLimit(peer_id, limit)) => {
 					if let Some(connection) = self.connected.get_mut(&peer_id) {

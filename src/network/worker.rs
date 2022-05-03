@@ -48,8 +48,8 @@ pub enum WorkerIn {
 		MixPublicKey,
 		ConnectionId,
 	),
-	AddConnectedInbound(MixPeerId, NegotiatedSubstream),
-	AddConnectedOutbound(MixPeerId, NegotiatedSubstream),
+	AddConnectedInbound(MixPeerId, ConnectionId, NegotiatedSubstream),
+	AddConnectedOutbound(MixPeerId, ConnectionId, NegotiatedSubstream),
 	RemoveConnectedPeer(MixPeerId),
 	ImportMessage(MixPeerId, Packet),
 }
@@ -169,24 +169,28 @@ impl<T: Topology> MixnetWorker<T> {
 						public_key,
 						con_id,
 					) => {
-						self.connected.entry(peer.clone()).or_insert_with(|| {
+						let con = self.connected.entry(peer.clone()).or_insert_with(|| {
 							Connection::new(con_id, self.default_limit_msg.clone())
 						});
+
+						log::error!(target: "mixnet", "added peer: {:?}", (peer, con.inbound.is_some(), con.outbound.is_some()));
 						self.mixnet.add_connected_peer(peer, public_key);
 					},
-					WorkerIn::AddConnectedInbound(peer, inbound) => {
-						if let Some(con) = self.connected.get_mut(&peer) {
-							con.inbound = Some(inbound);
-						} else {
-							log::error!(target: "mixnet", "Inbound stream for unregistered peer: {:?}", peer);
-						}
+					WorkerIn::AddConnectedInbound(peer, con_id, inbound) => {
+						let con = self.connected.entry(peer.clone()).or_insert_with(|| {
+							Connection::new(con_id, self.default_limit_msg.clone())
+						});
+						con.inbound = Some(inbound);
+						log::error!(target: "mixnet", "added peer in: {:?}", (peer, con.inbound.is_some(), con.outbound.is_some()));
+						// TODO receive mixpeer id (so no need for AddConnectedPeer).
 					},
-					WorkerIn::AddConnectedOutbound(peer, outbound) => {
-						if let Some(con) = self.connected.get_mut(&peer) {
-							con.outbound = Some(outbound);
-						} else {
-							log::error!(target: "mixnet", "Outbound stream for unregistered peer: {:?}", peer);
-						}
+					WorkerIn::AddConnectedOutbound(peer, con_id, outbound) => {
+						let con = self.connected.entry(peer.clone()).or_insert_with(|| {
+							Connection::new(con_id, self.default_limit_msg.clone())
+						});
+						con.outbound = Some(outbound);
+						log::error!(target: "mixnet", "added peer out: {:?}", (peer, con.inbound.is_some(), con.outbound.is_some()));
+						// TODO send mixpeer id (so no need for AddConnectedPeer).
 					},
 					WorkerIn::RemoveConnectedPeer(peer) => {
 						self.mixnet.remove_connected_peer(&peer);
