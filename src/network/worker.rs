@@ -21,23 +21,35 @@
 //! `NetworkBehaviour` can be to heavy (especially when shared with others), using
 //! a worker allows sending the process to a queue instead of runing it directly.
 
+use std::{collections::HashMap, num::Wrapping, time::Duration};
+
 use crate::{
 	core::{Config, MixEvent, MixPublicKey, Mixnet, Packet, SurbsPayload, Topology},
 	MessageType, MixPeerId, SendOptions,
 };
 use futures::{channel::mpsc::SendError, Sink, Stream};
+use futures_timer::Delay;
+use libp2p_core::{connection::ConnectionId, ConnectedPoint, Multiaddr, PeerId};
+use libp2p_swarm::{ConnectionHandler, ConnectionHandlerEvent, KeepAlive, NegotiatedSubstream};
 use std::{
 	pin::Pin,
 	task::{Context, Poll},
 };
 
+pub const WINDOW_LIMIT: Duration = Duration::from_secs(5);
 pub type WorkerStream = Pin<Box<dyn Stream<Item = WorkerIn> + Send>>;
 pub type WorkerSink = Pin<Box<dyn Sink<WorkerOut, Error = SendError> + Send>>;
 
 pub enum WorkerIn {
 	RegisterMessage(Option<MixPeerId>, Vec<u8>, SendOptions),
 	RegisterSurbs(Vec<u8>, SurbsPayload),
-	AddConnectedPeer(MixPeerId, MixPublicKey),
+	AddConnectedPeer(
+		MixPeerId,
+		MixPublicKey,
+		ConnectionId,
+	),
+	AddConnectedInbound(MixPeerId, NegotiatedSubstream),
+	AddConnectedOutbound(MixPeerId, NegotiatedSubstream),
 	RemoveConnectedPeer(MixPeerId),
 	ImportMessage(MixPeerId, Packet),
 }
@@ -47,18 +59,63 @@ pub enum WorkerOut {
 	ReceivedMessage(MixPeerId, Vec<u8>, MessageType),
 }
 
+/// Internal information tracked for an established connection.
+struct Connection {
+	id: ConnectionId,
+	read_timeout: Delay, /* TODO this is quite unpolled: could poll it in the worker?? actually
+	                      * on disconnect connection may stay open -> use keep alive of handler? */
+	inbound: Option<NegotiatedSubstream>,
+	outbound: Option<NegotiatedSubstream>,
+	// number of allowed message
+	// in a window of time (can be modified
+	// specifically by trait).
+	limit_msg: Option<u32>,
+	window_count: u32,
+	current_window: Wrapping<usize>,
+}
+
+impl Connection {
+	fn new(id: ConnectionId, limit_msg: Option<u32>) -> Self {
+		Self {
+			id,
+			read_timeout: Delay::new(Duration::new(2, 0)),
+			limit_msg,
+			window_count: 0,
+			current_window: Wrapping(0),
+			inbound: None,
+			outbound: None,
+		}
+	}
+}
+
 /// Embed mixnet and process queue of instruction.
 pub struct MixnetWorker<T> {
 	pub mixnet: Mixnet<T>,
 	worker_in: WorkerStream,
 	worker_out: WorkerSink,
+
+	default_limit_msg: Option<u32>,
+	current_window: Wrapping<usize>,
+	window_delay: Delay,
+
+	connected: HashMap<PeerId, Connection>,
 }
 
 impl<T: Topology> MixnetWorker<T> {
 	pub fn new(config: Config, topology: T, inner_channels: (WorkerSink, WorkerStream)) -> Self {
+		let default_limit_msg = config.limit_per_window;
 		let (worker_out, worker_in) = inner_channels;
 		let mixnet = crate::core::Mixnet::new(config, topology);
-		MixnetWorker { mixnet, worker_in, worker_out }
+		let window_delay = Delay::new(WINDOW_LIMIT);
+		MixnetWorker {
+			mixnet,
+			worker_in,
+			worker_out,
+			connected: Default::default(),
+			current_window: Wrapping(0),
+			default_limit_msg,
+			window_delay,
+		}
 	}
 
 	pub fn local_id(&self) -> &MixPeerId {
@@ -107,8 +164,29 @@ impl<T: Topology> MixnetWorker<T> {
 						}
 						return Poll::Ready(true)
 					},
-					WorkerIn::AddConnectedPeer(peer, public_key) => {
+					WorkerIn::AddConnectedPeer(
+						peer,
+						public_key,
+						con_id,
+					) => {
+						self.connected.entry(peer.clone()).or_insert_with(|| {
+							Connection::new(con_id, self.default_limit_msg.clone())
+						});
 						self.mixnet.add_connected_peer(peer, public_key);
+					},
+					WorkerIn::AddConnectedInbound(peer, inbound) => {
+						if let Some(con) = self.connected.get_mut(&peer) {
+							con.inbound = Some(inbound);
+						} else {
+							log::error!(target: "mixnet", "Inbound stream for unregistered peer: {:?}", peer);
+						}
+					},
+					WorkerIn::AddConnectedOutbound(peer, outbound) => {
+						if let Some(con) = self.connected.get_mut(&peer) {
+							con.outbound = Some(outbound);
+						} else {
+							log::error!(target: "mixnet", "Outbound stream for unregistered peer: {:?}", peer);
+						}
 					},
 					WorkerIn::RemoveConnectedPeer(peer) => {
 						self.mixnet.remove_connected_peer(&peer);

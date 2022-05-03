@@ -116,8 +116,8 @@ fn test_messages(num_peers: usize, message_count: usize, message_size: usize, wi
 		let (from_worker_sink, from_worker_stream) = mpsc::channel(1000);
 		let mixnet = mixnet::MixnetBehaviour::new(
 			cfg.clone(),
-			Box::pin(to_worker_sink),
-			Box::pin(from_worker_stream),
+			Box::new(to_worker_sink),
+			Box::new(from_worker_stream),
 		);
 		let mut worker = mixnet::MixnetWorker::new(
 			cfg,

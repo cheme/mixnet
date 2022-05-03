@@ -20,21 +20,24 @@
 
 // libp2p connection handler for the mixnet protocol.
 
-use crate::network::protocol;
+use crate::network::{protocol, WorkerSink};
 use futures::{future::BoxFuture, prelude::*};
 use libp2p_core::{upgrade::NegotiationError, UpgradeError};
 use libp2p_swarm::{
-	KeepAlive, NegotiatedSubstream, ConnectionHandler, ConnectionHandlerEvent,
-	ConnectionHandlerUpgrErr, SubstreamProtocol,
+	ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive,
+	NegotiatedSubstream, SubstreamProtocol,
 };
 use std::{
 	collections::VecDeque,
 	error::Error,
 	fmt, io,
+	pin::Pin,
 	task::{Context, Poll},
 	time::Duration,
 };
 use void::Void;
+use crate::network::WorkerIn;
+use crate::MixPeerId;
 
 /// The configuration for the protocol.
 #[derive(Clone, Debug)]
@@ -103,6 +106,8 @@ pub struct Handler {
 	/// Tracks the state of our handler.
 	state: State,
 	pending_message: Option<Message>,
+	/// Send connection to worker.
+	mixnet_worker_sink: Pin<WorkerSink>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +125,7 @@ enum State {
 
 impl Handler {
 	/// Builds a new `Handler` with the given configuration.
-	pub fn new(config: Config) -> Self {
+	pub fn new(config: Config, mixnet_worker_sink: WorkerSink) -> Self {
 		Handler {
 			config,
 			pending_errors: VecDeque::with_capacity(2),
@@ -128,6 +133,7 @@ impl Handler {
 			inbound: None,
 			state: State::Active,
 			pending_message: None,
+			mixnet_worker_sink: Pin::new(mixnet_worker_sink),
 		}
 	}
 }
@@ -145,8 +151,14 @@ impl ConnectionHandler for Handler {
 		SubstreamProtocol::new(protocol::Mixnet, ())
 	}
 
-	fn inject_fully_negotiated_inbound(&mut self, stream: NegotiatedSubstream, (): ()) {
-		self.inbound = Some(protocol::recv_message(stream).boxed());
+	fn inject_fully_negotiated_inbound(&mut self, (stream, peer_id): (NegotiatedSubstream, MixPeerId), _: ()) {
+		if let Err(e) = self
+						.mixnet_worker_sink
+						.as_mut()
+						.start_send(WorkerIn::AddConnectedInbound(peer_id, stream))
+					{
+						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
+					}
 	}
 
 	fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
@@ -180,6 +192,7 @@ impl ConnectionHandler for Handler {
 				// TODO ask ark if this should not buff (or safeguard ??).
 				log::warn!(target: "mixnet", "Dropped message, already sending");
 			},
+			Some(ProtocolState::Connected) => (),
 			None =>
 				if self.pending_message.is_some() {
 					log::warn!(target: "mixnet", "Dropped message");
@@ -273,11 +286,14 @@ impl ConnectionHandler for Handler {
 						self.pending_errors.push_front(Failure::Other { error: Box::new(e) });
 					},
 				},
+				Some(ProtocolState::Connected) => (),
 				None => {
 					self.outbound = Some(ProtocolState::OpenStream);
 					let protocol = SubstreamProtocol::new(protocol::Mixnet, ())
 						.with_timeout(self.config.connection_timeout);
-					return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol })
+					return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
+						protocol,
+					})
 				},
 			}
 		}
@@ -293,5 +309,6 @@ type SendFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>;
 enum ProtocolState {
 	OpenStream,
 	Idle(NegotiatedSubstream),
+	Connected,
 	Sending(SendFuture),
 }

@@ -25,6 +25,7 @@ mod handler;
 mod protocol;
 mod worker;
 
+use dyn_clone::DynClone;
 use crate::{
 	core::{self, Config, MixEvent, Packet, SurbsPayload, PUBLIC_KEY_LEN},
 	network::worker::{WorkerIn, WorkerOut},
@@ -35,8 +36,8 @@ use futures_timer::Delay;
 use handler::{Failure, Handler, Message};
 use libp2p_core::{connection::ConnectionId, ConnectedPoint, Multiaddr, PeerId};
 use libp2p_swarm::{
-	CloseConnection, IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler,
-	PollParameters,
+	CloseConnection, IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction,
+	NotifyHandler, PollParameters,
 };
 use std::{
 	collections::{HashMap, VecDeque},
@@ -78,9 +79,14 @@ impl Connection {
 	}
 }
 
-pub type WorkerStream = Pin<Box<dyn Stream<Item = WorkerOut> + Send>>;
-pub type WorkerSink = Pin<Box<dyn Sink<WorkerIn, Error = SendError> + Send>>;
+pub type WorkerStream = Box<dyn Stream<Item = WorkerOut> + Unpin + Send>;
+pub type WorkerSink = Box<dyn ClonableSink>;
 pub type WorkerChannels = (worker::WorkerSink, worker::WorkerStream);
+
+pub trait ClonableSink: Sink<WorkerIn, Error = SendError> + DynClone + Unpin + Send { }
+
+impl<T> ClonableSink for T
+where T:  Sink<WorkerIn, Error = SendError> + DynClone + Unpin + Send { }
 
 /// A [`NetworkBehaviour`] that implements the mixnet protocol.
 pub struct MixnetBehaviour {
@@ -88,7 +94,8 @@ pub struct MixnetBehaviour {
 	handshakes: HashMap<PeerId, Connection>,
 	pending_disconnect: VecDeque<(PeerId, ConnectionId)>,
 	mixnet_worker_sink: WorkerSink,
-	mixnet_worker_stream: WorkerStream,
+	pinned_mixnet_worker_sink: Pin<WorkerSink>,
+	mixnet_worker_stream: Pin<WorkerStream>,
 	events: VecDeque<NetworkEvent>,
 	handshake_queue: VecDeque<PeerId>,
 	public_key: MixPublicKey,
@@ -102,8 +109,9 @@ impl MixnetBehaviour {
 	pub fn new(config: Config, worker_in: WorkerSink, worker_out: WorkerStream) -> Self {
 		Self {
 			public_key: config.public_key,
+			pinned_mixnet_worker_sink: Pin::new(dyn_clone::clone_box(&*worker_in)),
 			mixnet_worker_sink: worker_in,
-			mixnet_worker_stream: worker_out,
+			mixnet_worker_stream: Pin::new(worker_out),
 			connected: Default::default(),
 			handshakes: Default::default(),
 			events: Default::default(),
@@ -123,7 +131,7 @@ impl MixnetBehaviour {
 		message: Vec<u8>,
 		send_options: SendOptions,
 	) -> std::result::Result<(), core::Error> {
-		self.mixnet_worker_sink
+		self.pinned_mixnet_worker_sink
 			.as_mut()
 			.start_send(WorkerIn::RegisterMessage(Some(to), message, send_options))
 			.map_err(|_| core::Error::WorkerChannelFull)
@@ -136,7 +144,7 @@ impl MixnetBehaviour {
 		message: Vec<u8>,
 		send_options: SendOptions,
 	) -> std::result::Result<(), core::Error> {
-		self.mixnet_worker_sink
+		self.pinned_mixnet_worker_sink
 			.as_mut()
 			.start_send(WorkerIn::RegisterMessage(None, message, send_options))
 			.map_err(|_| core::Error::WorkerChannelFull)
@@ -148,7 +156,7 @@ impl MixnetBehaviour {
 		message: Vec<u8>,
 		surbs: SurbsPayload,
 	) -> std::result::Result<(), core::Error> {
-		self.mixnet_worker_sink
+		self.pinned_mixnet_worker_sink
 			.as_mut()
 			.start_send(WorkerIn::RegisterSurbs(message, surbs))
 			.map_err(|_| core::Error::WorkerChannelFull)
@@ -216,7 +224,7 @@ impl NetworkBehaviour for MixnetBehaviour {
 	type OutEvent = NetworkEvent;
 
 	fn new_handler(&mut self) -> Self::ConnectionHandler {
-		Handler::new(handler::Config::new())
+		Handler::new(handler::Config::new(), dyn_clone::clone_box(&*self.mixnet_worker_sink))
 	}
 
 	fn inject_event(&mut self, peer_id: PeerId, con_id: ConnectionId, event: Result) {
@@ -235,9 +243,9 @@ impl NetworkBehaviour for MixnetBehaviour {
 					connection.read_timeout.reset(Duration::new(2, 0));
 					self.connected.insert(peer_id, connection);
 					if let Err(e) = self
-						.mixnet_worker_sink
+						.pinned_mixnet_worker_sink
 						.as_mut()
-						.start_send(WorkerIn::AddConnectedPeer(peer_id, pub_key))
+						.start_send(WorkerIn::AddConnectedPeer(peer_id, pub_key, con_id))
 					{
 						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
 					}
@@ -271,7 +279,7 @@ impl NetworkBehaviour for MixnetBehaviour {
 					};
 
 					if let Err(e) = self
-						.mixnet_worker_sink
+						.pinned_mixnet_worker_sink
 						.as_mut()
 						.start_send(WorkerIn::ImportMessage(peer_id, message))
 					{
@@ -326,7 +334,7 @@ impl NetworkBehaviour for MixnetBehaviour {
 			self.events.push_back(NetworkEvent::Disconnected(peer_id.clone()));
 		}
 		if let Err(e) = self
-			.mixnet_worker_sink
+			.pinned_mixnet_worker_sink
 			.as_mut()
 			.start_send(WorkerIn::RemoveConnectedPeer(peer_id.clone()))
 		{
