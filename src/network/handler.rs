@@ -24,8 +24,8 @@ use crate::{
 	network::{protocol, WorkerIn, WorkerSink},
 	MixPeerId,
 };
-use futures::{future::BoxFuture, prelude::*};
-use libp2p_core::{connection::ConnectionId, upgrade::NegotiationError, UpgradeError};
+use futures::prelude::*;
+use libp2p_core::{upgrade::NegotiationError, UpgradeError};
 use libp2p_swarm::{
 	ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive,
 	NegotiatedSubstream, SubstreamProtocol,
@@ -33,7 +33,7 @@ use libp2p_swarm::{
 use std::{
 	collections::VecDeque,
 	error::Error,
-	fmt, io,
+	fmt,
 	pin::Pin,
 	task::{Context, Poll},
 	time::Duration,
@@ -99,21 +99,16 @@ pub struct Handler {
 	/// Outbound failures that are pending to be processed by `poll()`.
 	pending_errors: VecDeque<Failure>,
 	/// The outbound state.
-	outbound: Option<ProtocolState>,
-	/// The inbound handler, i.e. if there is an inbound
-	/// substream, this is always a future that waits for the
-	/// next inbound message.
-	inbound: Option<MessageFuture>,
+	outbound_queried: bool,
 
 	/// Inbound stream.
 	inbound2: Option<NegotiatedSubstream>,
 	/// Outbound sink.
 	outbound2: Option<NegotiatedSubstream>,
 
-	peer_id: Option<(MixPeerId, ConnectionId)>,
+	peer_id: Option<MixPeerId>,
 	/// Tracks the state of our handler.
 	state: State,
-	pending_message: Option<Message>,
 	/// Send connection to worker.
 	mixnet_worker_sink: Pin<WorkerSink>,
 	connection_closed: Option<Pin<Box<futures::channel::oneshot::Receiver<()>>>>,
@@ -138,13 +133,11 @@ impl Handler {
 		Handler {
 			config,
 			pending_errors: VecDeque::with_capacity(2),
-			outbound: None,
-			inbound: None,
+			outbound_queried: false,
 			outbound2: None,
 			inbound2: None,
 			peer_id: None,
 			state: State::Active,
-			pending_message: None,
 			mixnet_worker_sink: Pin::new(mixnet_worker_sink),
 			connection_closed: None,
 		}
@@ -152,29 +145,18 @@ impl Handler {
 }
 
 impl Handler {
-	fn check_connected(&mut self) {
+	fn try_send_connected(&mut self) {
 		if self.inbound2.is_some() && self.outbound2.is_some() && self.peer_id.is_some() {
 			match (self.inbound2.take(), self.outbound2.take(), self.peer_id.clone().take()) {
-				(Some(inbound), Some(outbound), Some((peer, con_id))) => {
-					let mut sender = if self.connection_closed.is_none() {
-						let (s, r) = futures::channel::oneshot::channel();
-						self.connection_closed = Some(Box::pin(r));
-						Some(s)
-					} else {
-						None
-					};
-					if let Err(e) =
-						self.mixnet_worker_sink.as_mut().start_send(WorkerIn::AddConnectedInbound(
-							peer.clone(),
-							con_id.clone(),
-							sender.take(),
-							inbound,
-						)) {
-						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
-					}
-					if let Err(e) = self.mixnet_worker_sink.as_mut().start_send(
-						WorkerIn::AddConnectedOutbound(peer, con_id, sender.take(), outbound),
-					) {
+				(Some(inbound), Some(outbound), Some(peer)) => {
+					let (sender, r) = futures::channel::oneshot::channel();
+					self.connection_closed = Some(Box::pin(r));
+					if let Err(e) = self.mixnet_worker_sink.as_mut().start_send(WorkerIn::AddPeer(
+						peer.clone(),
+						inbound,
+						outbound,
+						sender,
+					)) {
 						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
 					}
 				},
@@ -185,8 +167,8 @@ impl Handler {
 }
 
 impl ConnectionHandler for Handler {
-	type InEvent = (MixPeerId, ConnectionId);
-	type OutEvent = crate::network::Result;
+	type InEvent = MixPeerId;
+	type OutEvent = ();
 	type Error = Failure;
 	type InboundProtocol = protocol::Mixnet;
 	type OutboundProtocol = protocol::Mixnet;
@@ -199,22 +181,21 @@ impl ConnectionHandler for Handler {
 
 	fn inject_fully_negotiated_inbound(&mut self, stream: NegotiatedSubstream, _: ()) {
 		self.inbound2 = Some(stream);
-		self.check_connected();
+		self.try_send_connected();
 	}
 
 	fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
 		self.outbound2 = Some(stream);
-		self.outbound = Some(ProtocolState::Connected);
-		self.check_connected();
+		self.try_send_connected();
 	}
 
-	fn inject_event(&mut self, peer: (MixPeerId, ConnectionId)) {
+	fn inject_event(&mut self, peer: MixPeerId) {
 		self.peer_id = Some(peer);
-		self.check_connected();
+		self.try_send_connected();
 	}
 
 	fn inject_dial_upgrade_error(&mut self, _info: (), error: ConnectionHandlerUpgrErr<Void>) {
-		self.outbound = None; // Request a new substream on the next `poll`.
+		self.outbound_queried = false; // Request a new substream on the next `poll`.
 
 		let error = match error {
 			ConnectionHandlerUpgrErr::Upgrade(UpgradeError::Select(NegotiationError::Failed)) => {
@@ -239,7 +220,7 @@ impl ConnectionHandler for Handler {
 	fn poll(
 		&mut self,
 		cx: &mut Context<'_>,
-	) -> Poll<ConnectionHandlerEvent<protocol::Mixnet, (), crate::network::Result, Self::Error>> {
+	) -> Poll<ConnectionHandlerEvent<protocol::Mixnet, (), (), Self::Error>> {
 		if let Some(r) = self.connection_closed.as_mut() {
 			match r.as_mut().poll(cx) {
 				Poll::Pending => (),
@@ -251,84 +232,25 @@ impl ConnectionHandler for Handler {
 				return Poll::Pending // nothing to do on this connection
 			},
 			State::Inactive { reported: false } => {
+				log::trace!(target: "mixnet", "Network error: {}", Failure::Unsupported);
 				self.state = State::Inactive { reported: true };
-				return Poll::Ready(ConnectionHandlerEvent::Custom(Err(Failure::Unsupported)))
 			},
 			State::Active => {},
 		}
 
-		// Handle inbound messages.
-		if let Some(fut) = self.inbound.as_mut() {
-			match fut.poll_unpin(cx) {
-				Poll::Pending => {},
-				Poll::Ready(Err(e)) => {
-					log::debug!(target: "mixnet", "Inbound message error: {:?}", e);
-					self.inbound = None;
-				},
-				Poll::Ready(Ok((stream, msg))) => {
-					// An inbound message.
-					self.inbound = Some(protocol::recv_message(stream).boxed());
-					return Poll::Ready(ConnectionHandlerEvent::Custom(Ok(Message(msg))))
-				},
-			}
+		// Check for outbound failures.
+		if let Some(error) = self.pending_errors.pop_back() {
+			log::debug!(target: "mixnet", "Protocol failure: {:?}", error);
+			return Poll::Ready(ConnectionHandlerEvent::Close(error))
 		}
 
-		loop {
-			// Check for outbound failures.
-			if let Some(error) = self.pending_errors.pop_back() {
-				log::debug!(target: "mixnet", "Protocol failure: {:?}", error);
-				return Poll::Ready(ConnectionHandlerEvent::Close(error))
-			}
-
-			// Continue outbound messages.
-			match self.outbound.take() {
-				// TODO just conn negotiation
-				Some(ProtocolState::Idle(stream)) => {
-					self.outbound = Some(ProtocolState::Idle(stream));
-					break
-				},
-				Some(ProtocolState::OpenStream) => {
-					self.outbound = Some(ProtocolState::OpenStream);
-					break
-				},
-				Some(ProtocolState::Sending(mut future)) => match future.poll_unpin(cx) {
-					Poll::Pending => {
-						self.outbound = Some(ProtocolState::Sending(future));
-						break
-					},
-					Poll::Ready(Ok(stream)) => {
-						self.outbound = Some(ProtocolState::Idle(stream));
-						break
-					},
-					Poll::Ready(Err(e)) => {
-						self.pending_errors.push_front(Failure::Other { error: Box::new(e) });
-					},
-				},
-				Some(ProtocolState::Connected) => {
-					self.outbound = Some(ProtocolState::Connected);
-				},
-				None => {
-					self.outbound = Some(ProtocolState::OpenStream);
-					let protocol = SubstreamProtocol::new(protocol::Mixnet, ())
-						.with_timeout(self.config.connection_timeout);
-					return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
-						protocol,
-					})
-				},
-			}
+		if !self.outbound_queried {
+			self.outbound_queried = true;
+			let protocol = SubstreamProtocol::new(protocol::Mixnet, ())
+				.with_timeout(self.config.connection_timeout);
+			return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol })
 		}
 
 		Poll::Pending
 	}
-}
-
-type MessageFuture = BoxFuture<'static, Result<(NegotiatedSubstream, Vec<u8>), io::Error>>;
-type SendFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>;
-
-/// The current state w.r.t. outbound messages.
-enum ProtocolState {
-	OpenStream,
-	Idle(NegotiatedSubstream),
-	Connected,
-	Sending(SendFuture),
 }

@@ -21,14 +21,17 @@
 //! `NetworkBehaviour` can be to heavy (especially when shared with others), using
 //! a worker allows sending the process to a queue instead of runing it directly.
 
-use std::{collections::HashMap, num::Wrapping, time::Duration};
+use std::{
+	collections::{HashMap, VecDeque},
+	num::Wrapping,
+	time::Duration,
+};
 
 use crate::{
 	core::{
-		Config, Error, MixEvent, MixPublicKey, Mixnet, Packet, SurbsPayload, Topology,
-		PUBLIC_KEY_LEN,
+		Config, MixEvent, MixPublicKey, Mixnet, Packet, SurbsPayload, Topology, PUBLIC_KEY_LEN,
 	},
-	MessageType, MixPeerId, SendOptions,
+	MessageType, MixPeerId, SendOptions, PACKET_SIZE,
 };
 use futures::{
 	channel::{mpsc::SendError, oneshot::Sender as OneShotSender},
@@ -36,8 +39,8 @@ use futures::{
 	AsyncRead, AsyncWrite, Sink, Stream,
 };
 use futures_timer::Delay;
-use libp2p_core::{connection::ConnectionId, ConnectedPoint, Multiaddr, PeerId};
-use libp2p_swarm::{ConnectionHandler, ConnectionHandlerEvent, KeepAlive, NegotiatedSubstream};
+use libp2p_core::PeerId;
+use libp2p_swarm::NegotiatedSubstream;
 use std::{
 	pin::Pin,
 	task::{Context, Poll},
@@ -50,27 +53,23 @@ pub type WorkerSink = Pin<Box<dyn Sink<WorkerOut, Error = SendError> + Send>>;
 pub enum WorkerIn {
 	RegisterMessage(Option<MixPeerId>, Vec<u8>, SendOptions),
 	RegisterSurbs(Vec<u8>, SurbsPayload),
-	AddConnectedPeer(MixPeerId, MixPublicKey, ConnectionId),
-	AddConnectedInbound(MixPeerId, ConnectionId, Option<OneShotSender<()>>, NegotiatedSubstream),
-	// TODO merge with AddConnectedInbound -> then remove lot of option)?
-	AddConnectedOutbound(MixPeerId, ConnectionId, Option<OneShotSender<()>>, NegotiatedSubstream),
+	AddPeer(MixPeerId, NegotiatedSubstream, NegotiatedSubstream, OneShotSender<()>),
 	RemoveConnectedPeer(MixPeerId),
-	ImportMessage(MixPeerId, Packet),
+	ImportExternalMessage(MixPeerId, Packet),
 }
 
 pub enum WorkerOut {
-	Event(MixEvent),
 	ReceivedMessage(MixPeerId, Vec<u8>, MessageType),
+	Connected(PeerId, MixPublicKey),
 }
 
 /// Internal information tracked for an established connection.
 struct Connection {
-	id: ConnectionId,
 	peer_id: MixPeerId,
-	read_timeout: Delay, // TODO use handler TTL instead?
-	inbound: Option<Pin<Box<NegotiatedSubstream>>>, // TOOD remove some pin with Ext traits
-	outbound: Option<Pin<Box<NegotiatedSubstream>>>, /* TODO just use a single stream for in and
-	                                                 * out? */
+	read_timeout: Delay,                    // TODO use handler TTL instead?
+	inbound: Pin<Box<NegotiatedSubstream>>, // TODO remove some pin with Ext traits
+	outbound: Pin<Box<NegotiatedSubstream>>, /* TODO just use a single stream for in and
+	                                         * out? */
 	outbound_waiting: Option<(Vec<u8>, usize)>,
 	inbound_waiting: (Vec<u8>, usize),
 	// number of allowed message
@@ -80,31 +79,33 @@ struct Connection {
 	window_count: u32,
 	current_window: Wrapping<usize>,
 	public_key: Option<MixPublicKey>,
+	packet_flushing: bool,
 	handshake_flushing: bool,
 	handshake_sent: bool,
 	// inform connection handler when closing.
-	oneshot_handler: Option<OneShotSender<()>>,
+	oneshot_handler: OneShotSender<()>,
 }
 
 impl Connection {
 	fn new(
-		id: ConnectionId,
 		peer_id: MixPeerId,
 		limit_msg: Option<u32>,
-		oneshot_handler: Option<OneShotSender<()>>,
+		oneshot_handler: OneShotSender<()>,
+		inbound: NegotiatedSubstream,
+		outbound: NegotiatedSubstream,
 	) -> Self {
 		Self {
-			id,
 			peer_id,
 			read_timeout: Delay::new(Duration::new(2, 0)),
 			limit_msg,
 			window_count: 0,
 			current_window: Wrapping(0),
-			inbound: None,
-			outbound: None,
+			inbound: Box::pin(inbound),
+			outbound: Box::pin(outbound),
 			outbound_waiting: None,
-			inbound_waiting: (vec![0; crate::PACKET_SIZE], 0),
+			inbound_waiting: (vec![0; PACKET_SIZE], 0),
 			public_key: None,
+			packet_flushing: false,
 			handshake_flushing: false,
 			handshake_sent: false,
 			oneshot_handler,
@@ -116,98 +117,199 @@ impl Connection {
 	}
 
 	fn is_ready(&self) -> bool {
-		self.handshake_sent &&
-			self.handshake_received() &&
-			self.inbound.is_some() &&
-			self.outbound.is_some()
+		self.handshake_sent && self.handshake_received()
 	}
 
-	// return true if not pending
+	// return false on error
 	fn try_send_handshake(
 		&mut self,
 		cx: &mut Context,
 		public_key: &MixPublicKey,
-	) -> Result<bool, ()> {
+	) -> Poll<Result<(), ()>> {
 		if self.handshake_flushing {
-			if let Some(outbound) = self.outbound.as_mut() {
-				match outbound.as_mut().poll_flush(cx) {
-					Poll::Ready(Ok(())) => {
-						self.handshake_flushing = false;
-						self.handshake_sent = true;
-					},
-					Poll::Ready(Err(_)) => {
-						return Err(());
-					},
-					Poll::Pending => {
-						return Ok(false)
-					},
-				}
+			match self.outbound.as_mut().poll_flush(cx) {
+				Poll::Ready(Ok(())) => {
+					self.handshake_flushing = false;
+					self.handshake_sent = true;
+					return Poll::Ready(Ok(()))
+				},
+				Poll::Ready(Err(_)) => return Poll::Ready(Err(())),
+				Poll::Pending => return Poll::Pending,
 			}
 		}
 		if self.handshake_sent {
-			return Ok(false)
+			return Poll::Pending
 		}
-		if let Some(outbound) = self.outbound.as_mut() {
-			let (handshake, mut ix) = self
-				.outbound_waiting
-				.take()
-				.unwrap_or_else(|| (public_key.to_bytes().to_vec(), 0));
+		let (handshake, mut ix) = self
+			.outbound_waiting
+			.take()
+			.unwrap_or_else(|| (public_key.to_bytes().to_vec(), 0));
 
-			match outbound.as_mut().poll_write(cx, &handshake.as_slice()[ix..]) {
-				Poll::Pending => {
-					// Not ready, buffing in next
+		match self.outbound.as_mut().poll_write(cx, &handshake.as_slice()[ix..]) {
+			Poll::Pending => {
+				// Not ready, buffing in next
+				self.outbound_waiting = Some((handshake, ix));
+				Poll::Pending
+			},
+			Poll::Ready(Ok(nb)) => {
+				ix += nb;
+				if ix == handshake.len() {
+					self.handshake_flushing = true;
+				} else {
 					self.outbound_waiting = Some((handshake, ix));
-				},
+				}
+				Poll::Ready(Ok(()))
+			},
+			Poll::Ready(Err(e)) => {
+				log::trace!(target: "mixnet", "Error sending to peer, closing: {:?}", e);
+				Poll::Ready(Err(()))
+			},
+		}
+	}
+
+	fn try_packet_flushing(&mut self, cx: &mut Context) -> Poll<Result<(), ()>> {
+		if let Some((waiting, mut ix)) = self.outbound_waiting.as_mut() {
+			match self.outbound.as_mut().poll_write(cx, &waiting[ix..]) {
+				Poll::Pending => return Poll::Pending,
 				Poll::Ready(Ok(nb)) => {
 					ix += nb;
-					if ix == handshake.len() {
-						self.handshake_flushing = true;
-					} else {
-						self.outbound_waiting = Some((handshake, ix));
+					if ix != PACKET_SIZE {
+						return Poll::Ready(Ok(()))
 					}
-					return Ok(true)
+					self.packet_flushing = true;
 				},
 				Poll::Ready(Err(e)) => {
 					log::trace!(target: "mixnet", "Error sending to peer, closing: {:?}", e);
-					return Err(())
+					return Poll::Ready(Err(()))
 				},
 			}
 		}
+		self.outbound_waiting = None;
 
-		Ok(false)
+		if self.packet_flushing {
+			match self.outbound.as_mut().poll_flush(cx) {
+				Poll::Ready(Ok(())) => {
+					self.packet_flushing = false;
+					return Poll::Ready(Ok(()))
+				},
+				Poll::Ready(Err(_)) => return Poll::Ready(Err(())),
+				Poll::Pending => return Poll::Pending,
+			}
+		}
+		Poll::Ready(Ok(()))
 	}
 
-	// return true if not pending
-	fn try_recv_handshake(&mut self, cx: &mut Context) -> Result<bool, ()> {
-		if self.handshake_received() {
-			return Ok(false)
+	// return packet if already sending one.
+	fn try_send_packet(
+		&mut self,
+		cx: &mut Context,
+		packet: Vec<u8>,
+	) -> (Poll<Result<(), ()>>, Option<Vec<u8>>) {
+		if !self.is_ready() {
+			return (Poll::Ready(Err(())), Some(packet))
 		}
-		if let Some(inbound) = self.inbound.as_mut() {
-			match inbound
-				.as_mut()
-				.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..PUBLIC_KEY_LEN])
-			{
-				Poll::Pending => (),
-				Poll::Ready(Ok(nb)) => {
-					self.read_timeout.reset(Duration::new(2, 0));
-					self.inbound_waiting.1 += nb;
-					if self.inbound_waiting.1 == PUBLIC_KEY_LEN {
-						let mut pk = [0u8; PUBLIC_KEY_LEN];
-						pk.copy_from_slice(&self.inbound_waiting.0[..PUBLIC_KEY_LEN]);
-						self.inbound_waiting.1 = 0;
-						self.public_key = Some(MixPublicKey::from(pk));
-						log::trace!(target: "mixnet", "Handshake message from {:?}", self.peer_id);
-					}
-					return Ok(true)
-				},
-				Poll::Ready(Err(e)) => {
-					log::trace!(target: "mixnet", "Error receiving from peer, closing: {:?}", e);
-					return Err(())
-				},
-			}
-		}
+		// TODO move connection to mixnet so we directly try send
+		// their and have a mix queue in each connection.
 
-		Ok(false)
+		match self.try_packet_flushing(cx) {
+			Poll::Ready(Ok(())) => (),
+			Poll::Ready(Err(())) => return (Poll::Ready(Err(())), Some(packet)),
+			Poll::Pending => return (Poll::Pending, Some(packet)),
+		}
+		if self.outbound_waiting.is_some() || self.packet_flushing {
+			return (Poll::Ready(Ok(())), Some(packet))
+		}
+		match self.outbound.as_mut().poll_write(cx, &packet[..]) {
+			Poll::Pending => {
+				self.outbound_waiting = Some((packet, 0));
+				(Poll::Pending, None)
+			},
+			Poll::Ready(Ok(nb)) => {
+				if nb != PACKET_SIZE {
+					self.outbound_waiting = Some((packet, nb));
+				}
+				(Poll::Ready(Ok(())), None)
+			},
+			Poll::Ready(Err(e)) => {
+				log::trace!(target: "mixnet", "Error sending to peer, closing: {:?}", e);
+				(Poll::Ready(Err(())), Some(packet))
+			},
+		}
+	}
+
+	fn try_recv_handshake(&mut self, cx: &mut Context) -> Poll<Result<Option<MixPublicKey>, ()>> {
+		if self.handshake_received() {
+			return Poll::Pending
+		}
+		match self
+			.inbound
+			.as_mut()
+			.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..PUBLIC_KEY_LEN])
+		{
+			Poll::Pending => Poll::Pending,
+			Poll::Ready(Ok(nb)) => {
+				self.read_timeout.reset(Duration::new(2, 0));
+				self.inbound_waiting.1 += nb;
+				if self.inbound_waiting.1 == PUBLIC_KEY_LEN {
+					let mut pk = [0u8; PUBLIC_KEY_LEN];
+					pk.copy_from_slice(&self.inbound_waiting.0[..PUBLIC_KEY_LEN]);
+					self.inbound_waiting.1 = 0;
+					self.public_key = Some(MixPublicKey::from(pk));
+					log::trace!(target: "mixnet", "Handshake message from {:?}", self.peer_id);
+				}
+				Poll::Ready(Ok(self.public_key.clone()))
+			},
+			Poll::Ready(Err(e)) => {
+				log::trace!(target: "mixnet", "Error receiving from peer, closing: {:?}", e);
+				Poll::Ready(Err(()))
+			},
+		}
+	}
+
+	fn try_recv_packet(
+		&mut self,
+		cx: &mut Context,
+		current_window: Wrapping<usize>,
+	) -> Poll<Result<Option<Packet>, ()>> {
+		if !self.is_ready() {
+			return Poll::Pending
+		}
+		match self
+			.inbound
+			.as_mut()
+			.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..])
+		{
+			Poll::Pending => Poll::Pending,
+			Poll::Ready(Ok(nb)) => {
+				self.read_timeout.reset(Duration::new(2, 0));
+				self.inbound_waiting.1 += nb;
+				let packet = if self.inbound_waiting.1 == PACKET_SIZE {
+					let packet = Packet::from_vec(self.inbound_waiting.0.clone()).unwrap();
+					self.inbound_waiting.1 = 0;
+					log::trace!(target: "mixnet", "Packet received from {:?}", self.peer_id);
+					if self.current_window == current_window {
+						self.window_count += 1;
+						if self.limit_msg.as_ref().map(|l| &self.window_count > l).unwrap_or(false)
+						{
+							log::warn!(target: "mixnet", "Receiving too many messages from {:?}, disconecting.", self.peer_id);
+							return Poll::Ready(Err(()))
+						}
+					} else {
+						self.current_window = current_window;
+						self.window_count = 1;
+					}
+
+					Some(packet)
+				} else {
+					None
+				};
+				Poll::Ready(Ok(packet))
+			},
+			Poll::Ready(Err(e)) => {
+				log::trace!(target: "mixnet", "Error receiving from peer, closing: {:?}", e);
+				Poll::Ready(Err(()))
+			},
+		}
 	}
 }
 
@@ -222,6 +324,9 @@ pub struct MixnetWorker<T> {
 	window_delay: Delay,
 
 	connected: HashMap<PeerId, Connection>,
+	// TODO move to Connection or at least add a delay here and drop if no connection
+	// after deley.
+	queue_packets: VecDeque<(MixPeerId, Vec<u8>)>,
 }
 
 impl<T: Topology> MixnetWorker<T> {
@@ -238,6 +343,7 @@ impl<T: Topology> MixnetWorker<T> {
 			current_window: Wrapping(0),
 			default_limit_msg,
 			window_delay,
+			queue_packets: Default::default(),
 		}
 	}
 
@@ -245,111 +351,82 @@ impl<T: Topology> MixnetWorker<T> {
 		self.mixnet.local_id()
 	}
 
-	pub fn change_peer_limit_window(&mut self, peer: MixPeerId, new_limit: Option<u32>) {
-		if let Err(e) = self
-			.worker_out
-			.as_mut()
-			.start_send(WorkerOut::Event(MixEvent::ChangeLimit(peer, new_limit)))
-		{
-			log::error!(target: "mixnet", "Error sending event to channel: {:?}", e);
+	pub fn change_peer_limit_window(&mut self, peer: &MixPeerId, new_limit: Option<u32>) {
+		if let Some(con) = self.connected.get_mut(peer) {
+			con.limit_msg = new_limit;
 		}
 	}
 
 	/// Return false on shutdown.
 	pub fn poll(&mut self, cx: &mut Context) -> Poll<bool> {
+		if let Poll::Ready(_) = self.window_delay.poll_unpin(cx) {
+			self.current_window += Wrapping(1);
+			self.window_delay.reset(WINDOW_LIMIT);
+		}
+
 		if let Poll::Ready(e) = self.mixnet.poll(cx) {
-			if let Err(e) = self.worker_out.as_mut().start_send(WorkerOut::Event(e)) {
-				log::error!(target: "mixnet", "Error sending event to channel: {:?}", e);
-				if e.is_disconnected() {
-					return Poll::Ready(false)
-				}
+			match e {
+				MixEvent::SendMessage((peer_id, packet)) => {
+					debug_assert!(packet.len() == PACKET_SIZE);
+					self.queue_packets.push_front((peer_id, packet));
+				},
+				MixEvent::Disconnect(_) => {
+					unimplemented!("TODO remove this event variant: not send from mixnet");
+				},
+				MixEvent::ChangeLimit(..) => {
+					unimplemented!("TODO remove this event variant: not send from mixnet");
+				},
 			}
 		}
 
 		match self.worker_in.as_mut().poll_next(cx) {
-			Poll::Ready(Some(message)) =>
-				match message {
-					WorkerIn::RegisterMessage(peer_id, message, send_options) => {
-						match self.mixnet.register_message(peer_id, message, send_options) {
-							Ok(()) => (),
-							Err(e) => {
-								log::error!(target: "mixnet", "Error registering message: {:?}", e);
-							},
-						}
-						return Poll::Ready(true)
-					},
-					WorkerIn::RegisterSurbs(message, surbs) => {
-						match self.mixnet.register_surbs(message, surbs) {
-							Ok(()) => (),
-							Err(e) => {
-								log::error!(target: "mixnet", "Error registering surbs: {:?}", e);
-							},
-						}
-						return Poll::Ready(true)
-					},
-					WorkerIn::AddConnectedPeer(peer, public_key, con_id) => {
-						unimplemented!("TODO remove: part of handshake");
-						/*						let con = self.connected.entry(peer.clone()).or_insert_with(|| {
-							Connection::new(con_id, self.default_limit_msg.clone())
-						});
-
-						log::error!(target: "mixnet", "added peer: {:?}", (peer, con.inbound.is_some(), con.outbound.is_some()));
-						self.mixnet.add_connected_peer(peer, public_key);*/
-					},
-					WorkerIn::AddConnectedInbound(peer, con_id, mut handler, inbound) => {
-						let con = self.connected.entry(peer.clone()).or_insert_with(|| {
-							Connection::new(
-								con_id,
-								peer.clone(),
-								self.default_limit_msg.clone(),
-								handler.take(),
-							)
-						});
-						con.inbound = Some(Box::pin(inbound));
-						con.inbound_waiting.1 = 0;
-						if handler.is_some() {
-							con.oneshot_handler = handler;
-						}
-						log::error!(target: "mixnet", "added peer in: {:?}", (peer, con.inbound.is_some(), con.outbound.is_some()));
-					},
-					WorkerIn::AddConnectedOutbound(peer, con_id, mut handler, outbound) => {
-						let con = self.connected.entry(peer.clone()).or_insert_with(|| {
-							Connection::new(
-								con_id,
-								peer.clone(),
-								self.default_limit_msg.clone(),
-								handler.take(),
-							)
-						});
-						con.outbound = Some(Box::pin(outbound));
-						con.outbound_waiting = None;
-						if handler.is_some() {
-							con.oneshot_handler = handler;
-						}
-						log::error!(target: "mixnet", "added peer out: {:?}", (peer, con.inbound.is_some(), con.outbound.is_some()));
-					},
-					WorkerIn::RemoveConnectedPeer(peer) => {
-						self.mixnet.remove_connected_peer(&peer);
-					},
-					WorkerIn::ImportMessage(peer, message) => {
-						match self.mixnet.import_message(peer, message) {
-							Ok(Some((full_message, surbs))) => {
-								if let Err(e) = self.worker_out.as_mut().start_send(
-									WorkerOut::ReceivedMessage(peer, full_message, surbs),
-								) {
-									log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
-									if e.is_disconnected() {
-										return Poll::Ready(false)
-									}
-								}
-							},
-							Ok(None) => (),
-							Err(e) => {
-								log::warn!(target: "mixnet", "Error importing message: {:?}", e);
-							},
-						}
-					},
+			Poll::Ready(Some(message)) => match message {
+				WorkerIn::RegisterMessage(peer_id, message, send_options) => {
+					match self.mixnet.register_message(peer_id, message, send_options) {
+						Ok(()) => (),
+						Err(e) => {
+							log::error!(target: "mixnet", "Error registering message: {:?}", e);
+						},
+					}
+					return Poll::Ready(true)
 				},
+				WorkerIn::RegisterSurbs(message, surbs) => {
+					match self.mixnet.register_surbs(message, surbs) {
+						Ok(()) => (),
+						Err(e) => {
+							log::error!(target: "mixnet", "Error registering surbs: {:?}", e);
+						},
+					}
+					return Poll::Ready(true)
+				},
+				WorkerIn::AddPeer(peer, inbound, outbound, handler) => {
+					if let Some(con) = self.connected.get_mut(&peer) {
+						con.inbound = Box::pin(inbound);
+						con.inbound_waiting.1 = 0;
+						con.outbound = Box::pin(outbound);
+						con.outbound_waiting = None;
+						con.oneshot_handler = handler;
+					} else {
+						let con = Connection::new(
+							peer.clone(),
+							self.default_limit_msg.clone(),
+							handler,
+							inbound,
+							outbound,
+						);
+						self.connected.insert(peer, con);
+					}
+					log::trace!(target: "mixnet", "added peer out: {:?}", peer);
+				},
+				WorkerIn::RemoveConnectedPeer(peer) => {
+					self.disconnect_peer(&peer);
+				},
+				WorkerIn::ImportExternalMessage(peer, packet) => {
+					if !self.import_packet(peer, packet) {
+						return Poll::Ready(false)
+					};
+				},
+			},
 			Poll::Ready(None) => {
 				// handler dropped, shutting down.
 				log::debug!(target: "mixnet", "Worker input closed, shutting down.");
@@ -358,45 +435,135 @@ impl<T: Topology> MixnetWorker<T> {
 			_ => (),
 		}
 
+		if let Some((peer_id, packet)) = self.queue_packets.pop_back() {
+			match self.connected.get_mut(&peer_id).map(|c| c.try_send_packet(cx, packet)) {
+				Some((Poll::Ready(Ok(())), packet)) => {
+					if let Some(packet) = packet {
+						self.queue_packets.push_front((peer_id, packet));
+					}
+					return Poll::Ready(true)
+				},
+				Some((Poll::Ready(Err(())), _)) => {
+					self.disconnect_peer(&peer_id);
+				},
+				Some((Poll::Pending, packet)) =>
+					if let Some(packet) = packet {
+						self.queue_packets.push_front((peer_id, packet));
+					},
+				None => {
+					// TODO could add delay and keep for a while in case connection happen later.
+					// TODO in principle should be checked in topology. Actually if forwarding to an
+					// external peer (eg surbs rep), this will need to dial (put rules behind a
+					// topology check).
+					log::error!(target: "mixnet", "Dropping packet, peer {:?} not connected in worker.", peer_id);
+				},
+			}
+		}
+
 		let mut result = Poll::Pending;
 		let mut disconnected = Vec::new();
+		let mut recv_packets = Vec::new();
 		for (_, connection) in self.connected.iter_mut() {
 			if !connection.is_ready() {
 				match connection.try_recv_handshake(cx) {
-					Ok(true) => {
+					Poll::Ready(Ok(key)) => {
+						key.map(|key| {
+							// TODO only send if configured to. (used in test only)
+							if let Err(e) = self.worker_out.as_mut().start_send(
+								WorkerOut::Connected(connection.peer_id.clone(), key.clone()),
+							) {
+								log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
+							}
+
+							self.mixnet.add_connected_peer(connection.peer_id.clone(), key)
+						});
 						result = Poll::Ready(true);
 					},
-					Ok(false) => (),
-					Err(()) => {
-						connection.oneshot_handler.take().map(|s| s.send(()));
+					Poll::Pending => (),
+					Poll::Ready(Err(())) => {
 						disconnected.push(connection.peer_id.clone());
 						continue
 					},
 				}
 				match connection.try_send_handshake(cx, &self.mixnet.public) {
-					Ok(true) => {
+					Poll::Ready(Ok(())) => {
 						result = Poll::Ready(true);
 					},
-					Ok(false) => (),
-					Err(()) => {
-						connection.oneshot_handler.take().map(|s| s.send(()));
+					Poll::Pending => (),
+					Poll::Ready(Err(())) => {
 						disconnected.push(connection.peer_id.clone());
 						continue
 					},
 				}
-				match connection.read_timeout.poll_unpin(cx) {
-					Poll::Ready(()) => {
-						connection.oneshot_handler.take().map(|s| s.send(()));
+			} else {
+				match connection.try_recv_packet(cx, self.current_window) {
+					Poll::Ready(Ok(Some(packet))) => {
+						recv_packets.push((connection.peer_id.clone(), packet));
+						result = Poll::Ready(true);
+					},
+					Poll::Ready(Ok(None)) => {},
+					Poll::Pending => (),
+					Poll::Ready(Err(())) => {
+						disconnected.push(connection.peer_id.clone());
+						continue
+					},
+				}
+				match connection.try_packet_flushing(cx) {
+					Poll::Ready(Err(())) => {
 						disconnected.push(connection.peer_id.clone());
 					},
-					Poll::Pending => (),
+					_ => (),
 				}
 			}
+
+			match connection.read_timeout.poll_unpin(cx) {
+				Poll::Ready(()) => {
+					disconnected.push(connection.peer_id.clone());
+				},
+				Poll::Pending => (),
+			}
 		}
+
+		for (peer, packet) in recv_packets {
+			if !self.import_packet(peer, packet) {
+				return Poll::Ready(false)
+			}
+		}
+
 		for peer in disconnected {
-			self.connected.remove(&peer);
+			self.disconnect_peer(&peer);
 		}
 
 		result
+	}
+
+	fn disconnect_peer(&mut self, peer: &MixPeerId) {
+		log::trace!(target: "Mixnet", "Diconnecting peer {:?}", peer);
+		if let Some(con) = self.connected.remove(peer) {
+			let _ = con.oneshot_handler.send(());
+		}
+		self.mixnet.remove_connected_peer(peer);
+	}
+
+	fn import_packet(&mut self, peer: MixPeerId, packet: Packet) -> bool {
+		match self.mixnet.import_message(peer, packet) {
+			Ok(Some((full_message, surbs))) => {
+				if let Err(e) = self.worker_out.as_mut().start_send(WorkerOut::ReceivedMessage(
+					peer,
+					full_message,
+					surbs,
+				)) {
+					log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
+					if e.is_disconnected() {
+						return false
+					}
+				}
+			},
+			Ok(None) => (),
+			Err(e) => {
+				log::warn!(target: "mixnet", "Error importing message: {:?}", e);
+			},
+		}
+		true
 	}
 }

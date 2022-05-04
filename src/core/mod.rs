@@ -489,7 +489,11 @@ impl<T: Topology> Mixnet<T> {
 					)))
 				}
 			}
-			if self.topology.routing() {
+			if false {
+				// TODO restore, but for testing this does send cover before connection and spam a
+				// bit too much (topology
+				// being initialized first: would be solved by connection centric cover sending.
+				//			if self.topology.routing() {
 				// No packet to forward, generate cover traffic
 				// TODO generate cover per peer? not random global
 				if let Some((recipient, data)) = self.cover_message() {
