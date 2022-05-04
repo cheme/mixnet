@@ -487,9 +487,7 @@ impl<T: Topology> Mixnet<T> {
 					)))
 				}
 			}
-			// TODO restore cover, currently it blocks tests and loop way too much.
-//			if self.topology.routing() {
-			if false {
+			if self.topology.routing() {
 				// No packet to forward, generate cover traffic
 				// TODO generate cover per peer? not random global
 				if let Some((recipient, data)) = self.cover_message() {

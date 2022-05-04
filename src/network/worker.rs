@@ -207,7 +207,8 @@ impl Connection {
 		packet: Vec<u8>,
 	) -> (Poll<Result<(), ()>>, Option<Vec<u8>>) {
 		if !self.is_ready() {
-			return (Poll::Ready(Err(())), Some(packet))
+			// Drop: TODO only drop after some
+			return (Poll::Pending, None)
 		}
 		// TODO move connection to mixnet so we directly try send
 		// their and have a mix queue in each connection.
