@@ -169,6 +169,7 @@ impl Connection {
 
 	fn try_packet_flushing(&mut self, cx: &mut Context) -> Poll<Result<(), ()>> {
 		if let Some((waiting, mut ix)) = self.outbound_waiting.as_mut() {
+			if ix < PACKET_SIZE {
 			match self.outbound.as_mut().poll_write(cx, &waiting[ix..]) {
 				Poll::Pending => return Poll::Pending,
 				Poll::Ready(Ok(nb)) => {
@@ -182,7 +183,7 @@ impl Connection {
 					log::trace!(target: "mixnet", "Error sending to peer, closing: {:?}", e);
 					return Poll::Ready(Err(()))
 				},
-			}
+			}}
 		}
 		self.outbound_waiting = None;
 
@@ -227,6 +228,8 @@ impl Connection {
 			Poll::Ready(Ok(nb)) => {
 				if nb != PACKET_SIZE {
 					self.outbound_waiting = Some((packet, nb));
+				} else {
+					self.packet_flushing = true;
 				}
 				(Poll::Ready(Ok(())), None)
 			},

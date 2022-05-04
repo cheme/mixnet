@@ -468,7 +468,7 @@ impl<T: Topology> Mixnet<T> {
 	// Poll for new messages to send over the wire.
 	pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<MixEvent> {
 		if Poll::Ready(()) == self.next_message.poll_unpin(cx) {
-			cx.waker().wake_by_ref();
+			cx.waker().wake_by_ref(); // TODO this seem to skip the delay ??
 			self.cleanup();
 			let mut rng = rand::thread_rng();
 			let next_delay = exp_delay(&mut rng, self.average_traffic_delay);
@@ -487,11 +487,9 @@ impl<T: Topology> Mixnet<T> {
 					)))
 				}
 			}
+			// TODO restore cover, currently it blocks tests and loop way too much.
+//			if self.topology.routing() {
 			if false {
-				// TODO restore, but for testing this does send cover before connection and spam a
-				// bit too much (topology
-				// being initialized first: would be solved by connection centric cover sending.
-				//			if self.topology.routing() {
 				// No packet to forward, generate cover traffic
 				// TODO generate cover per peer? not random global
 				if let Some((recipient, data)) = self.cover_message() {

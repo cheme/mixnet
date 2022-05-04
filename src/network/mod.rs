@@ -35,9 +35,10 @@ use futures::{channel::mpsc::SendError, Sink, Stream};
 use handler::Handler;
 use libp2p_core::{connection::ConnectionId, ConnectedPoint, Multiaddr, PeerId};
 use libp2p_swarm::{
-	IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
+	IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, PollParameters,
 };
 use std::{
+	collections::VecDeque,
 	pin::Pin,
 	task::{Context, Poll},
 	time::Duration,
@@ -59,6 +60,7 @@ pub struct MixnetBehaviour {
 	mixnet_worker_sink: WorkerSink,
 	pinned_mixnet_worker_sink: Pin<WorkerSink>,
 	mixnet_worker_stream: Pin<WorkerStream>,
+	notify_queue: VecDeque<(PeerId, ConnectionId)>,
 }
 
 impl MixnetBehaviour {
@@ -68,6 +70,7 @@ impl MixnetBehaviour {
 			pinned_mixnet_worker_sink: Pin::new(dyn_clone::clone_box(&*worker_in)),
 			mixnet_worker_sink: worker_in,
 			mixnet_worker_stream: Pin::new(worker_out),
+			notify_queue: Default::default(),
 		}
 	}
 
@@ -173,12 +176,13 @@ impl NetworkBehaviour for MixnetBehaviour {
 	fn inject_connection_established(
 		&mut self,
 		peer_id: &PeerId,
-		_: &ConnectionId,
+		con_id: &ConnectionId,
 		_: &ConnectedPoint,
 		_: Option<&Vec<Multiaddr>>,
 		_: usize,
 	) {
 		log::trace!(target: "mixnet", "Connected: {}", peer_id);
+		self.notify_queue.push_back((peer_id.clone(), con_id.clone()));
 	}
 
 	fn inject_connection_closed(
@@ -197,6 +201,14 @@ impl NetworkBehaviour for MixnetBehaviour {
 		cx: &mut Context<'_>,
 		_: &mut impl PollParameters,
 	) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>> {
+		if let Some((id, connection)) = self.notify_queue.pop_front() {
+			return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
+				peer_id: id,
+				handler: NotifyHandler::One(connection),
+				event: id,
+			})
+		}
+
 		match self.mixnet_worker_stream.as_mut().poll_next(cx) {
 			Poll::Ready(Some(out)) => match out {
 				WorkerOut::Connected(peer, public_key) =>
