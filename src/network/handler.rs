@@ -20,9 +20,12 @@
 
 // libp2p connection handler for the mixnet protocol.
 
-use crate::network::{protocol, WorkerSink};
+use crate::{
+	network::{protocol, WorkerIn, WorkerSink},
+	MixPeerId,
+};
 use futures::{future::BoxFuture, prelude::*};
-use libp2p_core::{upgrade::NegotiationError, UpgradeError, connection::ConnectionId};
+use libp2p_core::{connection::ConnectionId, upgrade::NegotiationError, UpgradeError};
 use libp2p_swarm::{
 	ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive,
 	NegotiatedSubstream, SubstreamProtocol,
@@ -36,8 +39,6 @@ use std::{
 	time::Duration,
 };
 use void::Void;
-use crate::network::WorkerIn;
-use crate::MixPeerId;
 
 /// The configuration for the protocol.
 #[derive(Clone, Debug)]
@@ -115,6 +116,7 @@ pub struct Handler {
 	pending_message: Option<Message>,
 	/// Send connection to worker.
 	mixnet_worker_sink: Pin<WorkerSink>,
+	connection_closed: Option<Pin<Box<futures::channel::oneshot::Receiver<()>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +146,7 @@ impl Handler {
 			state: State::Active,
 			pending_message: None,
 			mixnet_worker_sink: Pin::new(mixnet_worker_sink),
+			connection_closed: None,
 		}
 	}
 }
@@ -153,18 +156,25 @@ impl Handler {
 		if self.inbound2.is_some() && self.outbound2.is_some() && self.peer_id.is_some() {
 			match (self.inbound2.take(), self.outbound2.take(), self.peer_id.clone().take()) {
 				(Some(inbound), Some(outbound), Some((peer, con_id))) => {
-					if let Err(e) = self
-						.mixnet_worker_sink
-						.as_mut()
-						.start_send(WorkerIn::AddConnectedInbound(peer.clone(), con_id.clone(), inbound))
-					{
+					let mut sender = if self.connection_closed.is_none() {
+						let (s, r) = futures::channel::oneshot::channel();
+						self.connection_closed = Some(Box::pin(r));
+						Some(s)
+					} else {
+						None
+					};
+					if let Err(e) =
+						self.mixnet_worker_sink.as_mut().start_send(WorkerIn::AddConnectedInbound(
+							peer.clone(),
+							con_id.clone(),
+							sender.take(),
+							inbound,
+						)) {
 						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
 					}
-					if let Err(e) = self
-						.mixnet_worker_sink
-						.as_mut()
-						.start_send(WorkerIn::AddConnectedOutbound(peer, con_id, outbound))
-					{
+					if let Err(e) = self.mixnet_worker_sink.as_mut().start_send(
+						WorkerIn::AddConnectedOutbound(peer, con_id, sender.take(), outbound),
+					) {
 						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
 					}
 				},
@@ -230,6 +240,12 @@ impl ConnectionHandler for Handler {
 		&mut self,
 		cx: &mut Context<'_>,
 	) -> Poll<ConnectionHandlerEvent<protocol::Mixnet, (), crate::network::Result, Self::Error>> {
+		if let Some(r) = self.connection_closed.as_mut() {
+			match r.as_mut().poll(cx) {
+				Poll::Pending => (),
+				_ => return Poll::Ready(ConnectionHandlerEvent::Close(Failure::Unsupported)),
+			}
+		}
 		match self.state {
 			State::Inactive { reported: true } => {
 				return Poll::Pending // nothing to do on this connection
@@ -265,7 +281,8 @@ impl ConnectionHandler for Handler {
 			}
 
 			// Continue outbound messages.
-			match self.outbound.take() { // TODO just conn negotiation
+			match self.outbound.take() {
+				// TODO just conn negotiation
 				Some(ProtocolState::Idle(stream)) => {
 					self.outbound = Some(ProtocolState::Idle(stream));
 					break

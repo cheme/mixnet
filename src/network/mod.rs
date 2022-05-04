@@ -25,12 +25,12 @@ mod handler;
 mod protocol;
 mod worker;
 
-use dyn_clone::DynClone;
 use crate::{
 	core::{self, Config, MixEvent, Packet, SurbsPayload, PUBLIC_KEY_LEN},
 	network::worker::{WorkerIn, WorkerOut},
 	MixPublicKey, SendOptions,
 };
+use dyn_clone::DynClone;
 use futures::{channel::mpsc::SendError, FutureExt, Sink, Stream};
 use futures_timer::Delay;
 use handler::{Failure, Handler, Message};
@@ -83,10 +83,9 @@ pub type WorkerStream = Box<dyn Stream<Item = WorkerOut> + Unpin + Send>;
 pub type WorkerSink = Box<dyn ClonableSink>;
 pub type WorkerChannels = (worker::WorkerSink, worker::WorkerStream);
 
-pub trait ClonableSink: Sink<WorkerIn, Error = SendError> + DynClone + Unpin + Send { }
+pub trait ClonableSink: Sink<WorkerIn, Error = SendError> + DynClone + Unpin + Send {}
 
-impl<T> ClonableSink for T
-where T:  Sink<WorkerIn, Error = SendError> + DynClone + Unpin + Send { }
+impl<T> ClonableSink for T where T: Sink<WorkerIn, Error = SendError> + DynClone + Unpin + Send {}
 
 /// A [`NetworkBehaviour`] that implements the mixnet protocol.
 pub struct MixnetBehaviour {
@@ -365,7 +364,7 @@ impl NetworkBehaviour for MixnetBehaviour {
 					handler: NotifyHandler::One(connection.id),
 					event: (id, connection.id),
 				})
-				/* TODO worker to send actual handshake*/
+				/* TODO worker to send actual handshake */
 			}
 		}
 
@@ -376,7 +375,7 @@ impl NetworkBehaviour for MixnetBehaviour {
 			Poll::Ready(Some(out)) => match out {
 				WorkerOut::Event(MixEvent::SendMessage((recipient, data))) => {
 					/* TODO have it from worker */
-/*					if let Some(connection) = self.connected.get(&recipient) {
+					/*					if let Some(connection) = self.connected.get(&recipient) {
 						return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
 							peer_id: recipient,
 							handler: NotifyHandler::One(connection.id),

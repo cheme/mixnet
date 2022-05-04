@@ -174,6 +174,7 @@ impl std::cmp::Ord for QueuedPacket {
 pub struct Mixnet<T> {
 	pub topology: T,
 	num_hops: usize,
+	pub public: MixPublicKey,
 	secret: MixSecretKey,
 	local_id: MixPeerId,
 	// Incomplete incoming message fragments.
@@ -204,6 +205,7 @@ impl<T: Topology> Mixnet<T> {
 			replay_filter: ReplayFilter::new(&config),
 			persist_surbs_query: config.persist_surbs_query,
 			num_hops: config.num_hops as usize,
+			public: config.public_key,
 			secret: config.secret_key,
 			local_id: config.local_id,
 			fragments: MessageCollection::new(),
