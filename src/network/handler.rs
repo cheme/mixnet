@@ -99,12 +99,12 @@ pub struct Handler {
 	/// Outbound failures that are pending to be processed by `poll()`.
 	pending_errors: VecDeque<Failure>,
 	/// The outbound state.
-	outbound_queried: bool,
+	do_outbound_query: bool,
 
 	/// Inbound stream.
-	inbound2: Option<NegotiatedSubstream>,
+	inbound: Option<NegotiatedSubstream>,
 	/// Outbound sink.
-	outbound2: Option<NegotiatedSubstream>,
+	outbound: Option<NegotiatedSubstream>,
 
 	peer_id: Option<MixPeerId>,
 	/// Tracks the state of our handler.
@@ -133,9 +133,9 @@ impl Handler {
 		Handler {
 			config,
 			pending_errors: VecDeque::with_capacity(2),
-			outbound_queried: false,
-			outbound2: None,
-			inbound2: None,
+			do_outbound_query: true,
+			outbound: None,
+			inbound: None,
 			peer_id: None,
 			state: State::Active,
 			mixnet_worker_sink: Pin::new(mixnet_worker_sink),
@@ -146,8 +146,8 @@ impl Handler {
 
 impl Handler {
 	fn try_send_connected(&mut self) {
-		if self.inbound2.is_some() && self.outbound2.is_some() && self.peer_id.is_some() {
-			match (self.inbound2.take(), self.outbound2.take(), self.peer_id.clone().take()) {
+		if self.inbound.is_some() && self.outbound.is_some() && self.peer_id.is_some() {
+			match (self.inbound.take(), self.outbound.take(), self.peer_id.clone().take()) {
 				(Some(inbound), Some(outbound), Some(peer)) => {
 					let (sender, r) = futures::channel::oneshot::channel();
 					self.connection_closed = Some(Box::pin(r));
@@ -180,12 +180,12 @@ impl ConnectionHandler for Handler {
 	}
 
 	fn inject_fully_negotiated_inbound(&mut self, stream: NegotiatedSubstream, _: ()) {
-		self.inbound2 = Some(stream);
+		self.inbound = Some(stream);
 		self.try_send_connected();
 	}
 
 	fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
-		self.outbound2 = Some(stream);
+		self.outbound = Some(stream);
 		self.try_send_connected();
 	}
 
@@ -195,8 +195,6 @@ impl ConnectionHandler for Handler {
 	}
 
 	fn inject_dial_upgrade_error(&mut self, _info: (), error: ConnectionHandlerUpgrErr<Void>) {
-		self.outbound_queried = false; // Request a new substream on the next `poll`.
-
 		let error = match error {
 			ConnectionHandlerUpgrErr::Upgrade(UpgradeError::Select(NegotiationError::Failed)) => {
 				debug_assert_eq!(self.state, State::Active);
@@ -244,8 +242,8 @@ impl ConnectionHandler for Handler {
 			return Poll::Ready(ConnectionHandlerEvent::Close(error))
 		}
 
-		if !self.outbound_queried {
-			self.outbound_queried = true;
+		if self.do_outbound_query {
+			self.do_outbound_query = false;
 			let protocol = SubstreamProtocol::new(protocol::Mixnet, ())
 				.with_timeout(self.config.connection_timeout);
 			return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol })

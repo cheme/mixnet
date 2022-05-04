@@ -370,12 +370,6 @@ impl<T: Topology> MixnetWorker<T> {
 					debug_assert!(packet.len() == PACKET_SIZE);
 					self.queue_packets.push_front((peer_id, packet));
 				},
-				MixEvent::Disconnect(_) => {
-					unimplemented!("TODO remove this event variant: not send from mixnet");
-				},
-				MixEvent::ChangeLimit(..) => {
-					unimplemented!("TODO remove this event variant: not send from mixnet");
-				},
 			}
 		}
 
