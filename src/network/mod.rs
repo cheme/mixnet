@@ -58,7 +58,10 @@ impl<T> ClonableSink for T where T: Sink<WorkerIn, Error = SendError> + DynClone
 /// A [`NetworkBehaviour`] that implements the mixnet protocol.
 pub struct MixnetBehaviour {
 	mixnet_worker_sink: WorkerSink,
+	// TODO this is only redirecting to worker: just create a worker handle struct from it (no need
+	// to be in behaviour). 
 	pinned_mixnet_worker_sink: Pin<WorkerSink>,
+	// TODO this stream is simply redirecting workers to a sink: TODO use it directly in worker
 	mixnet_worker_stream: Pin<WorkerStream>,
 	notify_queue: VecDeque<(PeerId, ConnectionId)>,
 }
@@ -226,9 +229,7 @@ impl NetworkBehaviour for MixnetBehaviour {
 					)),
 			},
 			Poll::Ready(None) =>
-				return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-					NetworkEvent::CloseStream,
-				)),
+				return Poll::Ready(NetworkBehaviourAction::GenerateEvent(NetworkEvent::CloseStream)),
 			Poll::Pending => Poll::Pending,
 		}
 	}

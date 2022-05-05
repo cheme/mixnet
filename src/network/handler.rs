@@ -249,6 +249,7 @@ impl ConnectionHandler for Handler {
 			return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol })
 		}
 
+		// This is suspending with no wake register, but is poll very often by libp2p.
 		Poll::Pending
 	}
 }

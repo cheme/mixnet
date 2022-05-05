@@ -250,7 +250,6 @@ impl Connection {
 			.as_mut()
 			.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..PUBLIC_KEY_LEN])
 		{
-			Poll::Pending => Poll::Pending,
 			Poll::Ready(Ok(nb)) => {
 				self.read_timeout.reset(Duration::new(2, 0));
 				self.inbound_waiting.1 += nb;
@@ -267,6 +266,7 @@ impl Connection {
 				log::trace!(target: "mixnet", "Error receiving from peer, closing: {:?}", e);
 				Poll::Ready(Err(()))
 			},
+			Poll::Pending => Poll::Pending,
 		}
 	}
 
@@ -363,6 +363,7 @@ impl<T: Topology> MixnetWorker<T> {
 
 	/// Return false on shutdown.
 	pub fn poll(&mut self, cx: &mut Context) -> Poll<bool> {
+		let mut result = Poll::Pending;
 		if let Poll::Ready(_) = self.window_delay.poll_unpin(cx) {
 			self.current_window += Wrapping(1);
 			self.window_delay.reset(WINDOW_LIMIT);
@@ -458,7 +459,6 @@ impl<T: Topology> MixnetWorker<T> {
 			}
 		}
 
-		let mut result = Poll::Pending;
 		let mut disconnected = Vec::new();
 		let mut recv_packets = Vec::new();
 		for (_, connection) in self.connected.iter_mut() {
@@ -477,21 +477,21 @@ impl<T: Topology> MixnetWorker<T> {
 						});
 						result = Poll::Ready(true);
 					},
-					Poll::Pending => (),
 					Poll::Ready(Err(())) => {
 						disconnected.push(connection.peer_id.clone());
 						continue
 					},
+					Poll::Pending => (),
 				}
 				match connection.try_send_handshake(cx, &self.mixnet.public) {
 					Poll::Ready(Ok(())) => {
 						result = Poll::Ready(true);
 					},
-					Poll::Pending => (),
 					Poll::Ready(Err(())) => {
 						disconnected.push(connection.peer_id.clone());
 						continue
 					},
+					Poll::Pending => (),
 				}
 			} else {
 				match connection.try_recv_packet(cx, self.current_window) {
@@ -500,17 +500,20 @@ impl<T: Topology> MixnetWorker<T> {
 						result = Poll::Ready(true);
 					},
 					Poll::Ready(Ok(None)) => {},
-					Poll::Pending => (),
 					Poll::Ready(Err(())) => {
 						disconnected.push(connection.peer_id.clone());
 						continue
 					},
+					Poll::Pending => (),
 				}
 				match connection.try_packet_flushing(cx) {
+					Poll::Ready(Ok(())) => {
+					},
 					Poll::Ready(Err(())) => {
 						disconnected.push(connection.peer_id.clone());
+						continue
 					},
-					_ => (),
+					Poll::Pending => (),
 				}
 			}
 
