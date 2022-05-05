@@ -122,6 +122,11 @@ pub enum NetworkEvent {
 
 	/// A message has reached us.
 	Message(DecodedMessage),
+
+	/// Handle of a stream was dropped,
+	/// this behavior cannot be use properly
+	/// anymore.
+	CloseStream,
 }
 
 /// Variant of message received.
@@ -220,12 +225,11 @@ impl NetworkBehaviour for MixnetBehaviour {
 						NetworkEvent::Message(DecodedMessage { peer, message, kind }),
 					)),
 			},
-			Poll::Ready(None) => {
-				// TODO shutdown event?
-			},
-			_ => (),
+			Poll::Ready(None) =>
+				return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+					NetworkEvent::CloseStream,
+				)),
+			Poll::Pending => Poll::Pending,
 		}
-
-		Poll::Pending
 	}
 }
