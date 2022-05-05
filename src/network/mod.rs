@@ -38,7 +38,7 @@ use libp2p_swarm::{
 	IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, PollParameters,
 };
 use std::{
-	collections::VecDeque,
+	collections::{VecDeque, HashMap},
 	pin::Pin,
 	task::{Context, Poll},
 	time::Duration,
@@ -63,6 +63,8 @@ pub struct MixnetBehaviour {
 	pinned_mixnet_worker_sink: Pin<WorkerSink>,
 	// TODO this stream is simply redirecting workers to a sink: TODO use it directly in worker
 	mixnet_worker_stream: Pin<WorkerStream>,
+	// only to avoid two connection from same peer.
+	connected: HashMap<PeerId, ConnectionId>,
 	notify_queue: VecDeque<(PeerId, ConnectionId)>,
 }
 
@@ -74,6 +76,7 @@ impl MixnetBehaviour {
 			mixnet_worker_sink: worker_in,
 			mixnet_worker_stream: Pin::new(worker_out),
 			notify_queue: Default::default(),
+			connected: Default::default(),
 		}
 	}
 
@@ -179,7 +182,8 @@ impl NetworkBehaviour for MixnetBehaviour {
 		Handler::new(handler::Config::new(), dyn_clone::clone_box(&*self.mixnet_worker_sink))
 	}
 
-	fn inject_event(&mut self, _: PeerId, _: ConnectionId, _: ()) {}
+	fn inject_event(&mut self, _: PeerId, _: ConnectionId, _: ()) {
+	}
 
 	fn inject_connection_established(
 		&mut self,
@@ -190,18 +194,24 @@ impl NetworkBehaviour for MixnetBehaviour {
 		_: usize,
 	) {
 		log::trace!(target: "mixnet", "Connected: {}", peer_id);
-		self.notify_queue.push_back((peer_id.clone(), con_id.clone()));
+		if !self.connected.contains_key(peer_id) {
+			self.notify_queue.push_back((peer_id.clone(), con_id.clone()));
+			self.connected.insert(peer_id.clone(), con_id.clone());
+		}
 	}
 
 	fn inject_connection_closed(
 		&mut self,
 		peer_id: &PeerId,
-		_conn: &ConnectionId,
+		con_id: &ConnectionId,
 		_: &ConnectedPoint,
 		_: <Self::ConnectionHandler as IntoConnectionHandler>::Handler,
 		_: usize,
 	) {
 		log::trace!(target: "mixnet", "Disconnected: {}", peer_id);
+		if self.connected.get(peer_id) == Some(con_id) {
+			self.connected.remove(peer_id);
+		}
 	}
 
 	fn poll(

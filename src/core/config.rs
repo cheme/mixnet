@@ -69,7 +69,7 @@ impl Config {
 			num_hops: 3,
 			average_message_delay_ms: 500,
 			limit_per_window: Some(
-				(crate::network::WINDOW_BACKPRESSURE.as_millis() as u32 / 500) * 2,
+				(crate::network::WINDOW_BACKPRESSURE.as_millis() as u32 / 250) * 2,
 			),
 			surbs_ttl_ms: 100_000,
 			replay_ttl_ms: 100_000,

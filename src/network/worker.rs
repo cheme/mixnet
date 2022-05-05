@@ -47,13 +47,15 @@ use std::{
 };
 
 pub const WINDOW_LIMIT: Duration = Duration::from_secs(5);
+pub const READ_TIMEOUT: Duration = Duration::from_secs(120); // TODO a bit less, but currently not that many cover sent
 pub type WorkerStream = Pin<Box<dyn Stream<Item = WorkerIn> + Send>>;
 pub type WorkerSink = Pin<Box<dyn Sink<WorkerOut, Error = SendError> + Send>>;
 
 pub enum WorkerIn {
 	RegisterMessage(Option<MixPeerId>, Vec<u8>, SendOptions),
 	RegisterSurbs(Vec<u8>, SurbsPayload),
-	AddPeer(MixPeerId, NegotiatedSubstream, NegotiatedSubstream, OneShotSender<()>),
+	AddPeer(MixPeerId, Option<NegotiatedSubstream>, NegotiatedSubstream, OneShotSender<()>),
+	AddPeerInbound(MixPeerId, NegotiatedSubstream),
 	RemoveConnectedPeer(MixPeerId),
 	ImportExternalMessage(MixPeerId, Packet),
 }
@@ -67,7 +69,7 @@ pub enum WorkerOut {
 struct Connection {
 	peer_id: MixPeerId,
 	read_timeout: Delay,                    // TODO use handler TTL instead?
-	inbound: Pin<Box<NegotiatedSubstream>>, // TODO remove some pin with Ext traits
+	inbound: Option<Pin<Box<NegotiatedSubstream>>>, // TODO remove some pin with Ext traits
 	outbound: Pin<Box<NegotiatedSubstream>>, /* TODO just use a single stream for in and
 	                                         * out? */
 	outbound_waiting: Option<(Vec<u8>, usize)>,
@@ -91,16 +93,16 @@ impl Connection {
 		peer_id: MixPeerId,
 		limit_msg: Option<u32>,
 		oneshot_handler: OneShotSender<()>,
-		inbound: NegotiatedSubstream,
+		inbound: Option<NegotiatedSubstream>,
 		outbound: NegotiatedSubstream,
 	) -> Self {
 		Self {
 			peer_id,
-			read_timeout: Delay::new(Duration::new(2, 0)),
+			read_timeout: Delay::new(READ_TIMEOUT),
 			limit_msg,
 			window_count: 0,
 			current_window: Wrapping(0),
-			inbound: Box::pin(inbound),
+			inbound: inbound.map(|i| Box::pin(i)),
 			outbound: Box::pin(outbound),
 			outbound_waiting: None,
 			inbound_waiting: (vec![0; PACKET_SIZE], 0),
@@ -249,11 +251,11 @@ impl Connection {
 		}
 		match self
 			.inbound
-			.as_mut()
-			.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..PUBLIC_KEY_LEN])
+			.as_mut().map(|inbound| inbound.as_mut()
+			.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..PUBLIC_KEY_LEN]))
 		{
-			Poll::Ready(Ok(nb)) => {
-				self.read_timeout.reset(Duration::new(2, 0));
+			Some(Poll::Ready(Ok(nb))) => {
+				self.read_timeout.reset(READ_TIMEOUT);
 				self.inbound_waiting.1 += nb;
 				if self.inbound_waiting.1 == PUBLIC_KEY_LEN {
 					let mut pk = [0u8; PUBLIC_KEY_LEN];
@@ -264,11 +266,12 @@ impl Connection {
 				}
 				Poll::Ready(Ok(self.public_key.clone()))
 			},
-			Poll::Ready(Err(e)) => {
+			Some(Poll::Ready(Err(e))) => {
 				log::trace!(target: "mixnet", "Error receiving from peer, closing: {:?}", e);
 				Poll::Ready(Err(()))
 			},
-			Poll::Pending => Poll::Pending,
+			Some(Poll::Pending) => Poll::Pending,
+			None => Poll::Pending,
 		}
 	}
 
@@ -284,11 +287,11 @@ impl Connection {
 		}
 		match self
 			.inbound
-			.as_mut()
-			.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..])
+			.as_mut().map(|inbound| inbound.as_mut()
+			.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..]))
 		{
-			Poll::Ready(Ok(nb)) => {
-				self.read_timeout.reset(Duration::new(2, 0));
+			Some(Poll::Ready(Ok(nb))) => {
+				self.read_timeout.reset(READ_TIMEOUT);
 				self.inbound_waiting.1 += nb;
 				let packet = if self.inbound_waiting.1 == PACKET_SIZE {
 					let packet = Packet::from_vec(self.inbound_waiting.0.clone()).unwrap();
@@ -299,6 +302,9 @@ impl Connection {
 						if self.limit_msg.as_ref().map(|l| &self.window_count > l).unwrap_or(false)
 						{
 							log::warn!(target: "mixnet", "Receiving too many messages from {:?}, disconecting.", self.peer_id);
+							// TODO this is racy eg if you are in the topology but topology is not yet synch, you
+							// can get banned: need to just stop receiving for a while, and sender should delay
+							// its sending for the same amount of leniance.
 							return Poll::Ready(Err(()))
 						}
 					} else {
@@ -312,11 +318,12 @@ impl Connection {
 				};
 				Poll::Ready(Ok(packet))
 			},
-			Poll::Ready(Err(e)) => {
+			Some(Poll::Ready(Err(e))) => {
 				log::trace!(target: "mixnet", "Error receiving from peer, closing: {:?}", e);
 				Poll::Ready(Err(()))
 			},
-			Poll::Pending => Poll::Pending,
+			Some(Poll::Pending) => Poll::Pending,
+			None => Poll::Pending,
 		}
 	}
 }
@@ -369,6 +376,7 @@ impl<T: Topology> MixnetWorker<T> {
 	pub fn poll(&mut self, cx: &mut Context) -> Poll<bool> {
 		let mut result = Poll::Pending;
 		if let Poll::Ready(_) = self.window_delay.poll_unpin(cx) {
+			log::trace!(target: "mixnet", "New window");
 			self.current_window += Wrapping(1);
 			self.window_delay.reset(WINDOW_LIMIT);
 			result = Poll::Ready(true); // wait on next delay TODO could also retrun:
@@ -396,10 +404,11 @@ impl<T: Topology> MixnetWorker<T> {
 				},
 				WorkerIn::AddPeer(peer, inbound, outbound, handler) => {
 					if let Some(con) = self.connected.get_mut(&peer) {
-						con.inbound = Box::pin(inbound);
+						con.inbound = inbound.map(|i| Box::pin(i));
 						con.inbound_waiting.1 = 0;
 						con.outbound = Box::pin(outbound);
 						con.outbound_waiting = None;
+						// TODO Warning this will disconect a connection: rather spawn an error and drop the query
 						con.oneshot_handler = handler;
 					} else {
 						let con = Connection::new(
@@ -412,6 +421,14 @@ impl<T: Topology> MixnetWorker<T> {
 						self.connected.insert(peer, con);
 					}
 					log::trace!(target: "mixnet", "added peer out: {:?}", peer);
+				},
+				WorkerIn::AddPeerInbound(peer, inbound) => {
+					if let Some(con) = self.connected.get_mut(&peer) {
+						log::trace!(target: "mixnet", "Added inbound to peer: {:?}", peer);
+						con.inbound = Some(Box::pin(inbound));
+					} else {
+						log::warn!(target: "mixnet", "Received inbound for dropped peer: {:?}", peer);
+					}
 				},
 				WorkerIn::RemoveConnectedPeer(peer) => {
 					self.disconnect_peer(&peer);
@@ -524,6 +541,7 @@ impl<T: Topology> MixnetWorker<T> {
 
 			match connection.read_timeout.poll_unpin(cx) {
 				Poll::Ready(()) => {
+					log::trace!(target: "mixnet", "Peer, no recv for too long: {:?}", connection.peer_id);
 					disconnected.push(connection.peer_id.clone());
 				},
 				Poll::Pending => (),
@@ -544,7 +562,8 @@ impl<T: Topology> MixnetWorker<T> {
 	}
 
 	fn disconnect_peer(&mut self, peer: &MixPeerId) {
-		log::trace!(target: "Mixnet", "Diconnecting peer {:?}", peer);
+		log::trace!(target: "mixnet", "Disconnecting peer {:?}", peer);
+		log::error!(target: "mixnet", "Disconnecting peer {:?}", peer);
 		if let Some(con) = self.connected.remove(peer) {
 			let _ = con.oneshot_handler.send(());
 		}

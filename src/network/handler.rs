@@ -123,6 +123,10 @@ enum State {
 		/// This is used to avoid repeated events being emitted for a specific connection.
 		reported: bool,
 	},
+	/// We are actively exchanging mixnet traffic, no info sent to worker.
+	ActiveNotSent,
+	/// We are actively exchanging mixnet traffic, worker missing inbound.
+	ActiveInboundNotSent,
 	/// We are actively exchanging mixnet traffic.
 	Active,
 }
@@ -137,7 +141,7 @@ impl Handler {
 			outbound: None,
 			inbound: None,
 			peer_id: None,
-			state: State::Active,
+			state: State::ActiveNotSent,
 			mixnet_worker_sink: Pin::new(mixnet_worker_sink),
 			connection_closed: None,
 		}
@@ -146,11 +150,13 @@ impl Handler {
 
 impl Handler {
 	fn try_send_connected(&mut self) {
-		if self.inbound.is_some() && self.outbound.is_some() && self.peer_id.is_some() {
+		if self.state == State::ActiveNotSent && self.outbound.is_some() && self.peer_id.is_some() {
 			match (self.inbound.take(), self.outbound.take(), self.peer_id.clone().take()) {
-				(Some(inbound), Some(outbound), Some(peer)) => {
+				(inbound, Some(outbound), Some(peer)) => {
+					let with_inbound = inbound.is_some();
 					let (sender, r) = futures::channel::oneshot::channel();
 					self.connection_closed = Some(Box::pin(r));
+					log::trace!(target: "mixnet", "Sending peer to worker {:?}", peer);
 					if let Err(e) = self.mixnet_worker_sink.as_mut().start_send(WorkerIn::AddPeer(
 						peer.clone(),
 						inbound,
@@ -159,8 +165,27 @@ impl Handler {
 					)) {
 						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
 					}
+					if with_inbound {
+						self.state = State::Active;
+					} else {
+						self.state = State::ActiveInboundNotSent;
+					}
 				},
 				_ => (),
+			}
+		} else if self.state == State::ActiveInboundNotSent && self.inbound.is_some() && self.peer_id.is_some() {
+				match (self.inbound.take(), self.peer_id.clone().take()) {
+					(Some(inbound), Some(peer)) => {
+						log::trace!(target: "mixnet", "Sending peer inbound to worker {:?}", peer);
+						if let Err(e) = self.mixnet_worker_sink.as_mut().start_send(WorkerIn::AddPeerInbound(
+							peer.clone(),
+							inbound,
+						)) {
+							log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
+						}
+
+					},
+					_ => (),
 			}
 		}
 	}
@@ -180,12 +205,16 @@ impl ConnectionHandler for Handler {
 	}
 
 	fn inject_fully_negotiated_inbound(&mut self, stream: NegotiatedSubstream, _: ()) {
+				if self.state == State::ActiveNotSent || self.state == State::ActiveInboundNotSent {
 		self.inbound = Some(stream);
+				}
 		self.try_send_connected();
 	}
 
 	fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
+				if self.state == State::ActiveNotSent  {
 		self.outbound = Some(stream);
+				}
 		self.try_send_connected();
 	}
 
@@ -197,8 +226,7 @@ impl ConnectionHandler for Handler {
 	fn inject_dial_upgrade_error(&mut self, _info: (), error: ConnectionHandlerUpgrErr<Void>) {
 		let error = match error {
 			ConnectionHandlerUpgrErr::Upgrade(UpgradeError::Select(NegotiationError::Failed)) => {
-				debug_assert_eq!(self.state, State::Active);
-
+				log::warn!(target: "mixnet", "Connaction upgrade fail on dial.");
 				self.state = State::Inactive { reported: false };
 				return
 			},
@@ -222,7 +250,10 @@ impl ConnectionHandler for Handler {
 		if let Some(r) = self.connection_closed.as_mut() {
 			match r.as_mut().poll(cx) {
 				Poll::Pending => (),
-				_ => return Poll::Ready(ConnectionHandlerEvent::Close(Failure::Unsupported)),
+				_ => {
+					log::trace!(target: "mixnet", "Close connection from handler");
+					return Poll::Ready(ConnectionHandlerEvent::Close(Failure::Unsupported))
+				},
 			}
 		}
 		match self.state {
@@ -234,6 +265,8 @@ impl ConnectionHandler for Handler {
 				self.state = State::Inactive { reported: true };
 			},
 			State::Active => {},
+			State::ActiveNotSent => {},
+			State::ActiveInboundNotSent => {},
 		}
 
 		// Check for outbound failures.
