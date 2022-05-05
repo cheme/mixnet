@@ -126,6 +126,10 @@ impl Connection {
 		cx: &mut Context,
 		public_key: &MixPublicKey,
 	) -> Poll<Result<(), ()>> {
+		if self.handshake_sent {
+			// ignoring
+			return Poll::Pending
+		}
 		if self.handshake_flushing {
 			match self.outbound.as_mut().poll_flush(cx) {
 				Poll::Ready(Ok(())) => {
@@ -136,9 +140,6 @@ impl Connection {
 				Poll::Ready(Err(_)) => return Poll::Ready(Err(())),
 				Poll::Pending => return Poll::Pending,
 			}
-		}
-		if self.handshake_sent {
-			return Poll::Pending
 		}
 		let (handshake, mut ix) = self
 			.outbound_waiting
@@ -243,6 +244,7 @@ impl Connection {
 
 	fn try_recv_handshake(&mut self, cx: &mut Context) -> Poll<Result<Option<MixPublicKey>, ()>> {
 		if self.handshake_received() {
+			// ignore
 			return Poll::Pending
 		}
 		match self
@@ -276,6 +278,8 @@ impl Connection {
 		current_window: Wrapping<usize>,
 	) -> Poll<Result<Option<Packet>, ()>> {
 		if !self.is_ready() {
+			// TODO this is actually unreachable
+			// ignore
 			return Poll::Pending
 		}
 		match self
@@ -283,7 +287,6 @@ impl Connection {
 			.as_mut()
 			.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..])
 		{
-			Poll::Pending => Poll::Pending,
 			Poll::Ready(Ok(nb)) => {
 				self.read_timeout.reset(Duration::new(2, 0));
 				self.inbound_waiting.1 += nb;
@@ -313,6 +316,7 @@ impl Connection {
 				log::trace!(target: "mixnet", "Error receiving from peer, closing: {:?}", e);
 				Poll::Ready(Err(()))
 			},
+			Poll::Pending => Poll::Pending,
 		}
 	}
 }
@@ -367,15 +371,7 @@ impl<T: Topology> MixnetWorker<T> {
 		if let Poll::Ready(_) = self.window_delay.poll_unpin(cx) {
 			self.current_window += Wrapping(1);
 			self.window_delay.reset(WINDOW_LIMIT);
-		}
-
-		if let Poll::Ready(e) = self.mixnet.poll(cx) {
-			match e {
-				MixEvent::SendMessage((peer_id, packet)) => {
-					debug_assert!(packet.len() == PACKET_SIZE);
-					self.queue_packets.push_front((peer_id, packet));
-				},
-			}
+			result = Poll::Ready(true); // wait on next delay TODO could also retrun:
 		}
 
 		match self.worker_in.as_mut().poll_next(cx) {
@@ -432,6 +428,15 @@ impl<T: Topology> MixnetWorker<T> {
 				return Poll::Ready(false)
 			},
 			_ => (),
+		}
+
+		if let Poll::Ready(e) = self.mixnet.poll(cx) {
+			match e {
+				MixEvent::SendMessage((peer_id, packet)) => {
+					debug_assert!(packet.len() == PACKET_SIZE);
+					self.queue_packets.push_front((peer_id, packet));
+				},
+			}
 		}
 
 		if let Some((peer_id, packet)) = self.queue_packets.pop_back() {
