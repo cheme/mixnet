@@ -122,10 +122,17 @@ fn test_messages(num_peers: usize, message_count: usize, message_size: usize, wi
 			(Box::pin(from_worker_sink), Box::pin(to_worker_stream)),
 		);
 		let worker = future::poll_fn(move |cx| {
-			if worker.poll(cx) == Poll::Ready(false) {
-				Poll::Ready(())
-			} else {
-				Poll::Pending
+			loop {
+				match worker.poll(cx) {
+					Poll::Ready(false) => {
+						log::error!(target: "mixnet", "Shutting worker");
+						return Poll::Ready(())
+					},
+					Poll::Pending => {
+						return Poll::Pending
+					},
+					Poll::Ready(true) => (),
+				}
 			}
 		});
 		executor.spawn(worker).unwrap();

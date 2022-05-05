@@ -480,7 +480,6 @@ impl<T: Topology> Mixnet<T> {
 			if deadline {
 				if let Some(packet) = self.packet_queue.pop() {
 					log::trace!(target: "mixnet", "Outbound message for {:?}", packet.recipient);
-					cx.waker().wake_by_ref();
 					return Poll::Ready(MixEvent::SendMessage((
 						packet.recipient,
 						packet.data.into_vec(),
@@ -492,7 +491,6 @@ impl<T: Topology> Mixnet<T> {
 				// TODO generate cover per peer? not random global
 				if let Some((recipient, data)) = self.cover_message() {
 					log::trace!(target: "mixnet", "Cover message for {:?}", recipient);
-					cx.waker().wake_by_ref();
 					return Poll::Ready(MixEvent::SendMessage((recipient, data.into_vec())))
 				}
 			}
