@@ -468,7 +468,6 @@ impl<T: Topology> Mixnet<T> {
 	// Poll for new messages to send over the wire.
 	pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<MixEvent> {
 		if Poll::Ready(()) == self.next_message.poll_unpin(cx) {
-			cx.waker().wake_by_ref(); // TODO this seem to skip the delay ??
 			self.cleanup();
 			let mut rng = rand::thread_rng();
 			let next_delay = exp_delay(&mut rng, self.average_traffic_delay);
@@ -481,6 +480,7 @@ impl<T: Topology> Mixnet<T> {
 			if deadline {
 				if let Some(packet) = self.packet_queue.pop() {
 					log::trace!(target: "mixnet", "Outbound message for {:?}", packet.recipient);
+					cx.waker().wake_by_ref();
 					return Poll::Ready(MixEvent::SendMessage((
 						packet.recipient,
 						packet.data.into_vec(),
@@ -492,6 +492,7 @@ impl<T: Topology> Mixnet<T> {
 				// TODO generate cover per peer? not random global
 				if let Some((recipient, data)) = self.cover_message() {
 					log::trace!(target: "mixnet", "Cover message for {:?}", recipient);
+					cx.waker().wake_by_ref();
 					return Poll::Ready(MixEvent::SendMessage((recipient, data.into_vec())))
 				}
 			}
