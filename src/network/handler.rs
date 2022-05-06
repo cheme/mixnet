@@ -34,7 +34,6 @@ use std::{
 	collections::VecDeque,
 	error::Error,
 	fmt,
-	pin::Pin,
 	task::{Context, Poll},
 	time::Duration,
 };
@@ -111,7 +110,7 @@ pub struct Handler {
 	state: State,
 	/// Send connection to worker.
 	mixnet_worker_sink: WorkerSink,
-	connection_closed: Option<Pin<Box<futures::channel::oneshot::Receiver<()>>>>,
+	connection_closed: Option<futures::channel::oneshot::Receiver<()>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +154,7 @@ impl Handler {
 				(inbound, Some(outbound), Some(peer)) => {
 					let with_inbound = inbound.is_some();
 					let (sender, r) = futures::channel::oneshot::channel();
-					self.connection_closed = Some(Box::pin(r));
+					self.connection_closed = Some(r);
 					log::trace!(target: "mixnet", "Sending peer to worker {:?}", peer);
 					if let Err(e) = self.mixnet_worker_sink.as_mut().start_send_unpin(
 						WorkerIn::AddPeer(peer.clone(), inbound, outbound, sender),
@@ -248,7 +247,7 @@ impl ConnectionHandler for Handler {
 		cx: &mut Context<'_>,
 	) -> Poll<ConnectionHandlerEvent<protocol::Mixnet, (), (), Self::Error>> {
 		if let Some(r) = self.connection_closed.as_mut() {
-			match r.as_mut().poll(cx) {
+			match r.poll_unpin(cx) {
 				Poll::Pending => (),
 				_ => {
 					log::trace!(target: "mixnet", "Close connection from handler");

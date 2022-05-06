@@ -36,7 +36,7 @@ use crate::{
 use futures::{
 	channel::{mpsc::SendError, oneshot::Sender as OneShotSender},
 	future::FutureExt,
-	AsyncRead, AsyncWrite, Sink, Stream, SinkExt, StreamExt,
+	AsyncRead, AsyncWrite, Sink, SinkExt, Stream, StreamExt,
 };
 use futures_timer::Delay;
 use libp2p_core::PeerId;
@@ -492,9 +492,10 @@ impl<T: Topology> MixnetWorker<T> {
 					Poll::Ready(Ok(key)) => {
 						key.map(|key| {
 							// TODO only send if configured to. (used in test only)
-							if let Err(e) = self.worker_out.start_send_unpin(
-								WorkerOut::Connected(connection.peer_id.clone(), key.clone()),
-							) {
+							if let Err(e) = self.worker_out.start_send_unpin(WorkerOut::Connected(
+								connection.peer_id.clone(),
+								key.clone(),
+							)) {
 								log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
 							}
 
