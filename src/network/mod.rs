@@ -40,11 +40,8 @@ use libp2p_swarm::{
 use std::{
 	collections::{HashMap, VecDeque},
 	task::{Context, Poll},
-	time::Duration,
 };
 pub use worker::MixnetWorker;
-
-pub const WINDOW_BACKPRESSURE: Duration = Duration::from_secs(5);
 
 pub type WorkerStream = Box<dyn Stream<Item = WorkerOut> + Unpin + Send>;
 pub type WorkerSink = Box<dyn ClonableSink>;
