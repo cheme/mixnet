@@ -110,7 +110,7 @@ pub struct Handler {
 	/// Tracks the state of our handler.
 	state: State,
 	/// Send connection to worker.
-	mixnet_worker_sink: Pin<WorkerSink>,
+	mixnet_worker_sink: WorkerSink,
 	connection_closed: Option<Pin<Box<futures::channel::oneshot::Receiver<()>>>>,
 }
 
@@ -142,7 +142,7 @@ impl Handler {
 			inbound: None,
 			peer_id: None,
 			state: State::ActiveNotSent,
-			mixnet_worker_sink: Pin::new(mixnet_worker_sink),
+			mixnet_worker_sink,
 			connection_closed: None,
 		}
 	}
@@ -157,12 +157,9 @@ impl Handler {
 					let (sender, r) = futures::channel::oneshot::channel();
 					self.connection_closed = Some(Box::pin(r));
 					log::trace!(target: "mixnet", "Sending peer to worker {:?}", peer);
-					if let Err(e) = self.mixnet_worker_sink.as_mut().start_send(WorkerIn::AddPeer(
-						peer.clone(),
-						inbound,
-						outbound,
-						sender,
-					)) {
+					if let Err(e) = self.mixnet_worker_sink.as_mut().start_send_unpin(
+						WorkerIn::AddPeer(peer.clone(), inbound, outbound, sender),
+					) {
 						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
 					}
 					if with_inbound {
@@ -173,19 +170,22 @@ impl Handler {
 				},
 				_ => (),
 			}
-		} else if self.state == State::ActiveInboundNotSent && self.inbound.is_some() && self.peer_id.is_some() {
-				match (self.inbound.take(), self.peer_id.clone().take()) {
-					(Some(inbound), Some(peer)) => {
-						log::trace!(target: "mixnet", "Sending peer inbound to worker {:?}", peer);
-						if let Err(e) = self.mixnet_worker_sink.as_mut().start_send(WorkerIn::AddPeerInbound(
-							peer.clone(),
-							inbound,
-						)) {
-							log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
-						}
-
-					},
-					_ => (),
+		} else if self.state == State::ActiveInboundNotSent &&
+			self.inbound.is_some() &&
+			self.peer_id.is_some()
+		{
+			match (self.inbound.take(), self.peer_id.clone().take()) {
+				(Some(inbound), Some(peer)) => {
+					log::trace!(target: "mixnet", "Sending peer inbound to worker {:?}", peer);
+					if let Err(e) = self
+						.mixnet_worker_sink
+						.as_mut()
+						.start_send_unpin(WorkerIn::AddPeerInbound(peer.clone(), inbound))
+					{
+						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
+					}
+				},
+				_ => (),
 			}
 		}
 	}
@@ -205,16 +205,16 @@ impl ConnectionHandler for Handler {
 	}
 
 	fn inject_fully_negotiated_inbound(&mut self, stream: NegotiatedSubstream, _: ()) {
-				if self.state == State::ActiveNotSent || self.state == State::ActiveInboundNotSent {
-		self.inbound = Some(stream);
-				}
+		if self.state == State::ActiveNotSent || self.state == State::ActiveInboundNotSent {
+			self.inbound = Some(stream);
+		}
 		self.try_send_connected();
 	}
 
 	fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
-				if self.state == State::ActiveNotSent  {
-		self.outbound = Some(stream);
-				}
+		if self.state == State::ActiveNotSent {
+			self.outbound = Some(stream);
+		}
 		self.try_send_connected();
 	}
 

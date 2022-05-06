@@ -36,7 +36,7 @@ use crate::{
 use futures::{
 	channel::{mpsc::SendError, oneshot::Sender as OneShotSender},
 	future::FutureExt,
-	AsyncRead, AsyncWrite, Sink, Stream,
+	AsyncRead, AsyncWrite, Sink, Stream, SinkExt, StreamExt,
 };
 use futures_timer::Delay;
 use libp2p_core::PeerId;
@@ -48,8 +48,8 @@ use std::{
 
 pub const WINDOW_LIMIT: Duration = Duration::from_secs(5);
 pub const READ_TIMEOUT: Duration = Duration::from_secs(120); // TODO a bit less, but currently not that many cover sent
-pub type WorkerStream = Pin<Box<dyn Stream<Item = WorkerIn> + Send>>;
-pub type WorkerSink = Pin<Box<dyn Sink<WorkerOut, Error = SendError> + Send>>;
+pub type WorkerStream = Box<dyn Stream<Item = WorkerIn> + Unpin + Send>;
+pub type WorkerSink = Box<dyn Sink<WorkerOut, Error = SendError> + Unpin + Send>;
 
 pub enum WorkerIn {
 	RegisterMessage(Option<MixPeerId>, Vec<u8>, SendOptions),
@@ -68,10 +68,10 @@ pub enum WorkerOut {
 /// Internal information tracked for an established connection.
 struct Connection {
 	peer_id: MixPeerId,
-	read_timeout: Delay,                    // TODO use handler TTL instead?
+	read_timeout: Delay,                            // TODO use handler TTL instead?
 	inbound: Option<Pin<Box<NegotiatedSubstream>>>, // TODO remove some pin with Ext traits
-	outbound: Pin<Box<NegotiatedSubstream>>, /* TODO just use a single stream for in and
-	                                         * out? */
+	outbound: Pin<Box<NegotiatedSubstream>>,        /* TODO just use a single stream for in and
+	                                                 * out? */
 	outbound_waiting: Option<(Vec<u8>, usize)>,
 	inbound_waiting: (Vec<u8>, usize),
 	// number of allowed message
@@ -173,20 +173,21 @@ impl Connection {
 	fn try_packet_flushing(&mut self, cx: &mut Context) -> Poll<Result<(), ()>> {
 		if let Some((waiting, mut ix)) = self.outbound_waiting.as_mut() {
 			if ix < PACKET_SIZE {
-			match self.outbound.as_mut().poll_write(cx, &waiting[ix..]) {
-				Poll::Pending => return Poll::Pending,
-				Poll::Ready(Ok(nb)) => {
-					ix += nb;
-					if ix != PACKET_SIZE {
-						return Poll::Ready(Ok(()))
-					}
-					self.packet_flushing = true;
-				},
-				Poll::Ready(Err(e)) => {
-					log::trace!(target: "mixnet", "Error sending to peer, closing: {:?}", e);
-					return Poll::Ready(Err(()))
-				},
-			}}
+				match self.outbound.as_mut().poll_write(cx, &waiting[ix..]) {
+					Poll::Pending => return Poll::Pending,
+					Poll::Ready(Ok(nb)) => {
+						ix += nb;
+						if ix != PACKET_SIZE {
+							return Poll::Ready(Ok(()))
+						}
+						self.packet_flushing = true;
+					},
+					Poll::Ready(Err(e)) => {
+						log::trace!(target: "mixnet", "Error sending to peer, closing: {:?}", e);
+						return Poll::Ready(Err(()))
+					},
+				}
+			}
 		}
 		self.outbound_waiting = None;
 
@@ -249,11 +250,11 @@ impl Connection {
 			// ignore
 			return Poll::Pending
 		}
-		match self
-			.inbound
-			.as_mut().map(|inbound| inbound.as_mut()
-			.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..PUBLIC_KEY_LEN]))
-		{
+		match self.inbound.as_mut().map(|inbound| {
+			inbound
+				.as_mut()
+				.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..PUBLIC_KEY_LEN])
+		}) {
 			Some(Poll::Ready(Ok(nb))) => {
 				self.read_timeout.reset(READ_TIMEOUT);
 				self.inbound_waiting.1 += nb;
@@ -285,11 +286,11 @@ impl Connection {
 			// ignore
 			return Poll::Pending
 		}
-		match self
-			.inbound
-			.as_mut().map(|inbound| inbound.as_mut()
-			.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..]))
-		{
+		match self.inbound.as_mut().map(|inbound| {
+			inbound
+				.as_mut()
+				.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..])
+		}) {
 			Some(Poll::Ready(Ok(nb))) => {
 				self.read_timeout.reset(READ_TIMEOUT);
 				self.inbound_waiting.1 += nb;
@@ -302,9 +303,10 @@ impl Connection {
 						if self.limit_msg.as_ref().map(|l| &self.window_count > l).unwrap_or(false)
 						{
 							log::warn!(target: "mixnet", "Receiving too many messages from {:?}, disconecting.", self.peer_id);
-							// TODO this is racy eg if you are in the topology but topology is not yet synch, you
-							// can get banned: need to just stop receiving for a while, and sender should delay
-							// its sending for the same amount of leniance.
+							// TODO this is racy eg if you are in the topology but topology is not
+							// yet synch, you can get banned: need to just stop receiving for a
+							// while, and sender should delay its sending for the same amount of
+							// leniance.
 							return Poll::Ready(Err(()))
 						}
 					} else {
@@ -382,7 +384,7 @@ impl<T: Topology> MixnetWorker<T> {
 			result = Poll::Ready(true); // wait on next delay TODO could also retrun:
 		}
 
-		match self.worker_in.as_mut().poll_next(cx) {
+		match self.worker_in.poll_next_unpin(cx) {
 			Poll::Ready(Some(message)) => match message {
 				WorkerIn::RegisterMessage(peer_id, message, send_options) => {
 					match self.mixnet.register_message(peer_id, message, send_options) {
@@ -408,7 +410,8 @@ impl<T: Topology> MixnetWorker<T> {
 						con.inbound_waiting.1 = 0;
 						con.outbound = Box::pin(outbound);
 						con.outbound_waiting = None;
-						// TODO Warning this will disconect a connection: rather spawn an error and drop the query
+						// TODO Warning this will disconect a connection: rather spawn an error and
+						// drop the query
 						con.oneshot_handler = handler;
 					} else {
 						let con = Connection::new(
@@ -489,7 +492,7 @@ impl<T: Topology> MixnetWorker<T> {
 					Poll::Ready(Ok(key)) => {
 						key.map(|key| {
 							// TODO only send if configured to. (used in test only)
-							if let Err(e) = self.worker_out.as_mut().start_send(
+							if let Err(e) = self.worker_out.start_send_unpin(
 								WorkerOut::Connected(connection.peer_id.clone(), key.clone()),
 							) {
 								log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
@@ -529,8 +532,7 @@ impl<T: Topology> MixnetWorker<T> {
 					Poll::Pending => (),
 				}
 				match connection.try_packet_flushing(cx) {
-					Poll::Ready(Ok(())) => {
-					},
+					Poll::Ready(Ok(())) => {},
 					Poll::Ready(Err(())) => {
 						disconnected.push(connection.peer_id.clone());
 						continue
@@ -573,7 +575,7 @@ impl<T: Topology> MixnetWorker<T> {
 	fn import_packet(&mut self, peer: MixPeerId, packet: Packet) -> bool {
 		match self.mixnet.import_message(peer, packet) {
 			Ok(Some((full_message, surbs))) => {
-				if let Err(e) = self.worker_out.as_mut().start_send(WorkerOut::ReceivedMessage(
+				if let Err(e) = self.worker_out.start_send_unpin(WorkerOut::ReceivedMessage(
 					peer,
 					full_message,
 					surbs,

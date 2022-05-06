@@ -31,15 +31,14 @@ use crate::{
 	MixPublicKey, SendOptions,
 };
 use dyn_clone::DynClone;
-use futures::{channel::mpsc::SendError, Sink, Stream};
+use futures::{channel::mpsc::SendError, Sink, SinkExt, Stream, StreamExt};
 use handler::Handler;
 use libp2p_core::{connection::ConnectionId, ConnectedPoint, Multiaddr, PeerId};
 use libp2p_swarm::{
 	IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, PollParameters,
 };
 use std::{
-	collections::{VecDeque, HashMap},
-	pin::Pin,
+	collections::{HashMap, VecDeque},
 	task::{Context, Poll},
 	time::Duration,
 };
@@ -58,11 +57,8 @@ impl<T> ClonableSink for T where T: Sink<WorkerIn, Error = SendError> + DynClone
 /// A [`NetworkBehaviour`] that implements the mixnet protocol.
 pub struct MixnetBehaviour {
 	mixnet_worker_sink: WorkerSink,
-	// TODO this is only redirecting to worker: just create a worker handle struct from it (no need
-	// to be in behaviour). 
-	pinned_mixnet_worker_sink: Pin<WorkerSink>,
 	// TODO this stream is simply redirecting workers to a sink: TODO use it directly in worker
-	mixnet_worker_stream: Pin<WorkerStream>,
+	mixnet_worker_stream: WorkerStream,
 	// only to avoid two connection from same peer.
 	connected: HashMap<PeerId, ConnectionId>,
 	notify_queue: VecDeque<(PeerId, ConnectionId)>,
@@ -72,9 +68,8 @@ impl MixnetBehaviour {
 	/// Creates a new network behaviour with the given configuration.
 	pub fn new(worker_in: WorkerSink, worker_out: WorkerStream) -> Self {
 		Self {
-			pinned_mixnet_worker_sink: Pin::new(dyn_clone::clone_box(&*worker_in)),
 			mixnet_worker_sink: worker_in,
-			mixnet_worker_stream: Pin::new(worker_out),
+			mixnet_worker_stream: worker_out,
 			notify_queue: Default::default(),
 			connected: Default::default(),
 		}
@@ -88,9 +83,8 @@ impl MixnetBehaviour {
 		message: Vec<u8>,
 		send_options: SendOptions,
 	) -> std::result::Result<(), core::Error> {
-		self.pinned_mixnet_worker_sink
-			.as_mut()
-			.start_send(WorkerIn::RegisterMessage(Some(to), message, send_options))
+		self.mixnet_worker_sink
+			.start_send_unpin(WorkerIn::RegisterMessage(Some(to), message, send_options))
 			.map_err(|_| core::Error::WorkerChannelFull)
 	}
 
@@ -101,9 +95,8 @@ impl MixnetBehaviour {
 		message: Vec<u8>,
 		send_options: SendOptions,
 	) -> std::result::Result<(), core::Error> {
-		self.pinned_mixnet_worker_sink
-			.as_mut()
-			.start_send(WorkerIn::RegisterMessage(None, message, send_options))
+		self.mixnet_worker_sink
+			.start_send_unpin(WorkerIn::RegisterMessage(None, message, send_options))
 			.map_err(|_| core::Error::WorkerChannelFull)
 	}
 
@@ -113,9 +106,8 @@ impl MixnetBehaviour {
 		message: Vec<u8>,
 		surbs: SurbsPayload,
 	) -> std::result::Result<(), core::Error> {
-		self.pinned_mixnet_worker_sink
-			.as_mut()
-			.start_send(WorkerIn::RegisterSurbs(message, surbs))
+		self.mixnet_worker_sink
+			.start_send_unpin(WorkerIn::RegisterSurbs(message, surbs))
 			.map_err(|_| core::Error::WorkerChannelFull)
 	}
 }
@@ -182,8 +174,7 @@ impl NetworkBehaviour for MixnetBehaviour {
 		Handler::new(handler::Config::new(), dyn_clone::clone_box(&*self.mixnet_worker_sink))
 	}
 
-	fn inject_event(&mut self, _: PeerId, _: ConnectionId, _: ()) {
-	}
+	fn inject_event(&mut self, _: PeerId, _: ConnectionId, _: ()) {}
 
 	fn inject_connection_established(
 		&mut self,
@@ -227,7 +218,7 @@ impl NetworkBehaviour for MixnetBehaviour {
 			})
 		}
 
-		match self.mixnet_worker_stream.as_mut().poll_next(cx) {
+		match self.mixnet_worker_stream.poll_next_unpin(cx) {
 			Poll::Ready(Some(out)) => match out {
 				WorkerOut::Connected(peer, public_key) =>
 					return Poll::Ready(NetworkBehaviourAction::GenerateEvent(

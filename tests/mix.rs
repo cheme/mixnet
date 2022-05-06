@@ -119,20 +119,16 @@ fn test_messages(num_peers: usize, message_count: usize, message_size: usize, wi
 		let mut worker = mixnet::MixnetWorker::new(
 			cfg,
 			topology.clone(),
-			(Box::pin(from_worker_sink), Box::pin(to_worker_stream)),
+			(Box::new(from_worker_sink), Box::new(to_worker_stream)),
 		);
-		let worker = future::poll_fn(move |cx| {
-			loop {
-				match worker.poll(cx) {
-					Poll::Ready(false) => {
-						log::error!(target: "mixnet", "Shutting worker");
-						return Poll::Ready(())
-					},
-					Poll::Pending => {
-						return Poll::Pending
-					},
-					Poll::Ready(true) => (),
-				}
+		let worker = future::poll_fn(move |cx| loop {
+			match worker.poll(cx) {
+				Poll::Ready(false) => {
+					log::error!(target: "mixnet", "Shutting worker");
+					return Poll::Ready(())
+				},
+				Poll::Pending => return Poll::Pending,
+				Poll::Ready(true) => (),
 			}
 		});
 		executor.spawn(worker).unwrap();
