@@ -80,7 +80,7 @@ impl MixnetBehaviour {
 	/// multiple hops with random delays to the specified recipient.
 	pub fn send(
 		&mut self,
-		to: PeerId,
+		to: crate::MixPeerId,
 		message: Vec<u8>,
 		send_options: SendOptions,
 	) -> std::result::Result<(), core::Error> {
@@ -160,7 +160,7 @@ impl MessageType {
 pub struct DecodedMessage {
 	/// The peer ID of the last hop that we have received the message from. This is not the message
 	/// origin.
-	pub peer: PeerId,
+	pub peer: crate::MixPeerId,
 	/// Message data.
 	pub message: Vec<u8>,
 	/// Message kind.

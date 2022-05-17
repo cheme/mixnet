@@ -56,7 +56,8 @@ pub(crate) enum ConnectionEvent {
 
 pub(crate) struct ManagedConnection<C> {
 	pub(crate) connection: C, // TODO priv
-	peer_id: MixPeerId,
+	pub(crate) mixnet_id: Option<MixPeerId>, // TODO priv
+	pub(crate) peer_id: libp2p_core::PeerId, // TODO priv and rename to network_id
 	handshake_sent: bool,
 	public_key: Option<MixPublicKey>,
 	// Real messages queue, sorted by deadline.
@@ -76,7 +77,7 @@ pub(crate) struct ManagedConnection<C> {
 
 impl<C: Connection> ManagedConnection<C> {
 	pub fn new(
-		peer_id: MixPeerId,
+		peer_id: libp2p_core::PeerId,
 		limit_msg: Option<u32>,
 		connection: C,
 		current_window: Wrapping<usize>,
@@ -84,6 +85,7 @@ impl<C: Connection> ManagedConnection<C> {
 	) -> Self {
 		Self {
 			connection,
+			mixnet_id: None,
 			peer_id,
 			read_timeout: Delay::new(READ_TIMEOUT),
 			next_packet: None,
@@ -104,7 +106,7 @@ impl<C: Connection> ManagedConnection<C> {
 	}
 
 	fn handshake_received(&self) -> bool {
-		self.public_key.is_some()
+		self.public_key.is_some() && self.mixnet_id.is_some()
 	}
 
 	fn is_ready(&self) -> bool {
@@ -233,16 +235,20 @@ impl<C: Connection> ManagedConnection<C> {
 		topology: &impl Topology,
 		external: bool,
 	) -> Result<(), crate::Error> {
-		if self.packet_queue.len() > packet_per_window {
-			// TODO apply a margin ??
-			log::error!(target: "mixnet", "Dropping packet, queue full: {:?}", self.peer_id);
-			return Err(crate::Error::QueueFull)
+		if let Some(peer_id) = self.mixnet_id.as_ref() {
+			if self.packet_queue.len() > packet_per_window {
+				// TODO apply a margin ??
+				log::error!(target: "mixnet", "Dropping packet, queue full: {:?}", self.peer_id);
+				return Err(crate::Error::QueueFull)
+			}
+			if !external && !topology.routing_to(local_id, peer_id) {
+				return Err(crate::Error::NoPath(Some(peer_id.clone())))
+			}
+			self.packet_queue.push(packet);
+			Ok(())
+		} else {
+			Err(crate::Error::NoSphinxId)
 		}
-		if !external && !topology.routing_to(local_id, &self.peer_id) {
-			return Err(crate::Error::NoPath(Some(self.peer_id.clone())))
-		}
-		self.packet_queue.push(packet);
-		Ok(())
 	}
 
 	// TODO struct window progress!!
@@ -280,7 +286,7 @@ impl<C: Connection> ManagedConnection<C> {
 				Poll::Pending => (),
 			}
 			return result
-		} else {
+		} else if let Some(peer_id) = self.mixnet_id.clone() {
 			while self.sent_in_window < current_packet_in_window {
 				match self.try_send_flushed(cx) {
 					Poll::Ready(Ok(true)) => {
@@ -308,9 +314,9 @@ impl<C: Connection> ManagedConnection<C> {
 						} else {
 							//break;
 							if let Some(key) = self.public_key.clone() {
-								if topology.routing_to(local_id, &self.peer_id) {
+								if topology.routing_to(local_id, &peer_id) {
 									self.next_packet =
-										crate::core::cover_message_to(&self.peer_id, key)
+										crate::core::cover_message_to(&peer_id, key)
 											.map(|p| p.into_vec());
 								} else {
 									break
@@ -326,10 +332,10 @@ impl<C: Connection> ManagedConnection<C> {
 					Poll::Pending => break,
 				}
 			}
-			let current = if topology.routing_to(&self.peer_id, local_id) {
+			let current = if topology.routing_to(&peer_id, local_id) {
 				current_packet_in_window
 			} else {
-				let (n, d) = topology.allow_external(&self.peer_id).unwrap_or((0, 1));
+				let (n, d) = topology.allow_external(&peer_id).unwrap_or((0, 1));
 				(current_packet_in_window * n) / d
 			};
 			if self.recv_in_window < current {
@@ -367,6 +373,9 @@ impl<C: Connection> ManagedConnection<C> {
 				self.sent_in_window = 0;
 				self.recv_in_window = 0;
 			}
+		} else {
+			log::trace!(target: "mixnet", "No sphinx id, dropping.");
+			return Poll::Ready(ConnectionEvent::None)
 		}
 
 		match self.read_timeout.poll_unpin(cx) {

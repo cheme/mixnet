@@ -38,7 +38,7 @@ pub use connection::Connection;
 pub use error::Error;
 use futures::{channel::oneshot::Sender as OneShotSender, FutureExt, SinkExt};
 use futures_timer::Delay;
-use libp2p_core::{identity::ed25519, PeerId};
+use libp2p_core::{identity::ed25519};
 use rand::{CryptoRng, Rng};
 use rand_distr::Distribution;
 pub use sphinx::Error as SphinxError;
@@ -51,6 +51,7 @@ use std::{
 };
 pub use topology::{NoTopology, Topology};
 
+type NetworkPeerId = libp2p_core::PeerId;
 /// Mixnet peer DH static public key.
 pub type MixPublicKey = sphinx::PublicKey;
 /// Mixnet peer DH static secret key.
@@ -102,14 +103,12 @@ impl Packet {
 	}
 }
 
-type SphinxPeerId = [u8; 32];
-
 pub enum MixEvent {
-	Disconnected(Vec<MixPeerId>),
+	Disconnected(Vec<(NetworkPeerId, Option<MixPeerId>)>),
 	None,
 }
 
-fn to_sphinx_id(id: &MixPeerId) -> Result<SphinxPeerId, Error> {
+fn to_sphinx_id(id: &NetworkPeerId) -> Result<MixPeerId, Error> {
 	let hash = id.as_ref();
 	match libp2p_core::multihash::Code::try_from(hash.code()) {
 		Ok(libp2p_core::multihash::Code::Identity) => {
@@ -125,11 +124,11 @@ fn to_sphinx_id(id: &MixPeerId) -> Result<SphinxPeerId, Error> {
 	}
 }
 
-fn to_libp2p_id(id: SphinxPeerId) -> Result<PeerId, Error> {
+fn to_libp2p_id(id: MixPeerId) -> Result<NetworkPeerId, Error> {
 	let encoded = libp2p_core::identity::ed25519::PublicKey::decode(&id)
 		.map_err(|_e| Error::InvalidSphinxId(id.clone()))?;
 	let key = libp2p_core::identity::PublicKey::Ed25519(encoded);
-	Ok(MixPeerId::from_public_key(&key))
+	Ok(NetworkPeerId::from_public_key(&key))
 }
 
 fn exp_delay<R: Rng + CryptoRng + ?Sized>(rng: &mut R, target: Duration) -> Duration {
@@ -186,6 +185,7 @@ pub struct Mixnet<T, C> {
 	secret: MixSecretKey,
 	local_id: MixPeerId,
 	connected_peers: HashMap<MixPeerId, ManagedConnection<C>>,
+	pending_connected_peers: HashMap<NetworkPeerId, ManagedConnection<C>>, // TODO looks like we need a Network to mixpeerid to persist for disconnect from handler/behavior 
 	// Incomplete incoming message fragments.
 	fragments: fragment::MessageCollection,
 	// Message waiting for surb.
@@ -238,6 +238,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			local_id: config.local_id,
 			fragments: MessageCollection::new(),
 			connected_peers: Default::default(),
+			pending_connected_peers: Default::default(),
 			next_message: Delay::new(Duration::from_millis(0)),
 			average_hop_delay: Duration::from_millis(config.average_message_delay_ms as u64),
 			average_traffic_delay,
@@ -253,7 +254,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 
 	pub fn insert_connection(
 		&mut self,
-		peer: MixPeerId,
+		peer: NetworkPeerId,
 		connection: C,
 		established: Option<OneShotSender<()>>,
 	) {
@@ -264,11 +265,11 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			self.current_window,
 			established,
 		);
-		self.connected_peers.insert(peer, connection);
+		self.pending_connected_peers.insert(peer, connection);
 	}
 
-	pub fn connected_mut(&mut self, peer: &MixPeerId) -> Option<&mut C> {
-		self.connected_peers.get_mut(peer).map(|c| &mut c.connection)
+	pub fn pending_connected_mut(&mut self, peer: &NetworkPeerId) -> Option<&mut C> {
+		self.pending_connected_peers.get_mut(peer).map(|c| &mut c.connection)
 	}
 
 	pub(crate) fn managed_connection_mut(
@@ -383,11 +384,11 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 					paths.last(),
 				)?
 				.remove(0);
-			let first_node = to_sphinx_id(&paths[0].0).unwrap();
+			let first_node = paths[0].0.clone();
 			let paths: Vec<_> = paths
 				.into_iter()
 				.map(|(id, key)| sphinx::PathHop {
-					id: to_sphinx_id(&id).unwrap(),
+					id: id,
 					public_key: key.into(),
 				})
 				.collect();
@@ -403,7 +404,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			let hops: Vec<_> = paths[n]
 				.iter()
 				.map(|(id, key)| sphinx::PathHop {
-					id: to_sphinx_id(id).unwrap(),
+					id: id.clone(),
 					public_key: (*key).into(),
 				})
 				.collect();
@@ -444,7 +445,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 
 		let packet = sphinx::new_surb_packet(first_key, chunks.remove(0).into_vec(), header)
 			.map_err(|e| Error::SphinxError(e))?;
-		let dest = to_libp2p_id(first_node)?;
+		let dest = first_node;
 		if self.topology.neighbors(&self.local_id).is_some() {
 			// TODO is routing function
 			let delay = exp_delay(&mut rng, self.average_hop_delay);
@@ -478,25 +479,25 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		);
 		match result {
 			Err(e) => {
-				log::debug!(target: "mixnet", "Error unpacking message received from {} :{:?}", peer_id, e);
+				log::debug!(target: "mixnet", "Error unpacking message received from {:?} :{:?}", peer_id, e);
 				return Ok(None)
 			},
 			Ok(Unwrapped::Payload(payload)) => {
 				if let Some(m) = self.fragments.insert_fragment(payload, MessageType::StandAlone)? {
-					log::debug!(target: "mixnet", "Imported message from {} ({} bytes)", peer_id, m.0.len());
+					log::debug!(target: "mixnet", "Imported message from {:?} ({} bytes)", peer_id, m.0.len());
 					return Ok(Some(m))
 				} else {
-					log::trace!(target: "mixnet", "Inserted fragment message from {}", peer_id);
+					log::trace!(target: "mixnet", "Inserted fragment message from {:?}", peer_id);
 				}
 			},
 			Ok(Unwrapped::SurbsReply(payload, query)) => {
 				if let Some(m) =
 					self.fragments.insert_fragment(payload, MessageType::FromSurbs(query))?
 				{
-					log::debug!(target: "mixnet", "Imported surb from {} ({} bytes)", peer_id, m.0.len());
+					log::debug!(target: "mixnet", "Imported surb from {:?} ({} bytes)", peer_id, m.0.len());
 					return Ok(Some(m))
 				} else {
-					log::error!(target: "mixnet", "Surbs fragment from {}", peer_id);
+					log::error!(target: "mixnet", "Surbs fragment from {:?}", peer_id);
 				}
 			},
 			Ok(Unwrapped::SurbsQuery(encoded_surb, payload)) => {
@@ -505,16 +506,15 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 					.fragments
 					.insert_fragment(payload, MessageType::WithSurbs(encoded_surb.into()))?
 				{
-					log::debug!(target: "mixnet", "Imported message from {} ({} bytes)", peer_id, m.0.len());
+					log::debug!(target: "mixnet", "Imported message from {:?} ({} bytes)", peer_id, m.0.len());
 					return Ok(Some(m))
 				} else {
-					log::warn!(target: "mixnet", "Inserted fragment message from {}, stored surb enveloppe.", peer_id);
+					log::warn!(target: "mixnet", "Inserted fragment message from {:?}, stored surb enveloppe.", peer_id);
 				}
 			},
 			Ok(Unwrapped::Forward((next_id, delay, packet))) => {
 				// See if we can forward the message
-				let next_id = to_libp2p_id(next_id)?;
-				log::debug!(target: "mixnet", "Forward message from {} to {}", peer_id, next_id);
+				log::debug!(target: "mixnet", "Forward message from {:?} to {:?}", peer_id, next_id);
 				self.queue_packet(next_id, packet, Duration::from_nanos(delay as u64))?;
 			},
 		}
@@ -522,9 +522,13 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 	}
 
 	/// Should be called when a peer is disconnected.
-	pub fn remove_connected_peer(&mut self, id: &MixPeerId) {
-		self.connected_peers.remove(id);
-		self.topology.disconnect(id);
+	pub fn remove_connected_peer(&mut self, id: &NetworkPeerId, connected: Option<&MixPeerId>) {
+		// TODO keep mapping to MixPeerId from NetworkPeerId and disco from network
+		if let Some(id) = connected {
+			self.connected_peers.remove(id);
+			self.topology.disconnect(id);
+		}
+		self.pending_connected_peers.remove(id);
 	}
 
 	fn random_paths(
@@ -597,7 +601,52 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		let mut all_pending = true;
 		let mut disconnected = Vec::new();
 		let mut recv_packets = Vec::new();
-		// TODO futures unordered
+		let mut move_to_connected = Vec::new();
+		for (peer_id, connection) in self.pending_connected_peers.iter_mut() {
+			// TODO futures unordered
+			match connection.poll(
+				cx,
+				&self.local_id,
+				&self.public,
+				self.current_window,
+				self.current_packet_in_window,
+				self.packet_per_window,
+				self.last_now,
+				&mut self.topology,
+			) {
+					Poll::Ready(ConnectionEvent::Established(key)) => {
+						all_pending = false;
+						if let Some(sphinx_id) = connection.mixnet_id.clone() {
+							move_to_connected.push((connection.peer_id.clone(), sphinx_id));
+							self.topology.connected(sphinx_id.clone(), key);
+						}
+						if let Err(e) =
+							results.start_send_unpin(WorkerOut::Connected(connection.peer_id.clone(), key.clone()))
+						{
+							log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
+						}
+					},
+					Poll::Ready(ConnectionEvent::Broken) => {
+						// same as pending
+						disconnected.push((peer_id.clone(), None));
+					},
+					Poll::Ready(ConnectionEvent::Received(..)) => {
+						unreachable!();
+					},
+					Poll::Ready(ConnectionEvent::None) => {
+						all_pending = false;
+					},
+					Poll::Pending => (),
+			}
+		}
+
+
+
+		for (peer_id, mix_id) in move_to_connected.into_iter() {
+			if let Some(con) = self.pending_connected_peers.remove(&peer_id) {
+				self.connected_peers.insert(mix_id, con);
+			}
+		}
 		for (peer_id, connection) in self.connected_peers.iter_mut() {
 			// TODO loop on ready
 			// and import inside (requires to split connected from other mixnet
@@ -612,15 +661,8 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 				self.last_now,
 				&mut self.topology,
 			) {
-				Poll::Ready(ConnectionEvent::Established(key)) => {
-					all_pending = false;
-					if let Err(e) =
-						results.start_send_unpin(WorkerOut::Connected(peer_id.clone(), key.clone()))
-					{
-						log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
-					}
-
-					self.topology.connected(peer_id.clone(), key);
+				Poll::Ready(ConnectionEvent::Established(..)) => {
+					unreachable!();
 				},
 				Poll::Ready(ConnectionEvent::Received(packet)) => {
 					all_pending = false;
@@ -628,7 +670,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 				},
 				Poll::Ready(ConnectionEvent::Broken) => {
 					// same as pending
-					disconnected.push(peer_id.clone());
+					disconnected.push((connection.peer_id.clone(), Some(peer_id.clone())));
 				},
 				Poll::Ready(ConnectionEvent::None) => {
 					all_pending = false;
@@ -645,9 +687,9 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		}
 
 		if disconnected.len() > 0 {
-			for peer in disconnected.iter() {
+			for (peer, connected) in disconnected.iter() {
 				log::trace!(target: "mixnet", "Disconnecting peer {:?}", peer);
-				self.remove_connected_peer(peer);
+				self.remove_connected_peer(peer, connected.as_ref());
 			}
 
 			return Poll::Ready(MixEvent::Disconnected(disconnected))
@@ -856,7 +898,7 @@ pub(crate) fn cover_message_to(peer_id: &MixPeerId, peer_key: MixPublicKey) -> O
 	let mut rng = rand::thread_rng();
 	let message = fragment::Fragment::create_cover_fragment(&mut rng);
 	let hops =
-		vec![sphinx::PathHop { id: to_sphinx_id(peer_id).unwrap(), public_key: peer_key.into() }];
+		vec![sphinx::PathHop { id: peer_id.clone(), public_key: peer_key.into() }];
 	let (packet, _no_surb) = sphinx::new_packet(&mut rng, hops, message.into_vec(), None).ok()?;
 	Some(packet)
 }
