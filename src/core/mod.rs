@@ -38,7 +38,7 @@ pub use connection::Connection;
 pub use error::Error;
 use futures::{channel::oneshot::Sender as OneShotSender, FutureExt, SinkExt};
 use futures_timer::Delay;
-use libp2p_core::{identity::ed25519};
+use libp2p_core::identity::ed25519;
 use rand::{CryptoRng, Rng};
 use rand_distr::Distribution;
 pub use sphinx::Error as SphinxError;
@@ -104,7 +104,7 @@ impl Packet {
 }
 
 pub enum MixEvent {
-	Disconnected(Vec<(NetworkPeerId, Option<MixPeerId>)>),
+	Disconnected(Vec<NetworkPeerId>),
 	None,
 }
 
@@ -184,8 +184,8 @@ pub struct Mixnet<T, C> {
 	pub public: MixPublicKey,
 	secret: MixSecretKey,
 	local_id: MixPeerId,
-	connected_peers: HashMap<MixPeerId, ManagedConnection<C>>,
-	pending_connected_peers: HashMap<NetworkPeerId, ManagedConnection<C>>, // TODO looks like we need a Network to mixpeerid to persist for disconnect from handler/behavior 
+	connected_peers: HashMap<NetworkPeerId, ManagedConnection<C>>,
+	handshaken_peers: HashMap<MixPeerId, NetworkPeerId>,
 	// Incomplete incoming message fragments.
 	fragments: fragment::MessageCollection,
 	// Message waiting for surb.
@@ -238,7 +238,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			local_id: config.local_id,
 			fragments: MessageCollection::new(),
 			connected_peers: Default::default(),
-			pending_connected_peers: Default::default(),
+			handshaken_peers: Default::default(),
 			next_message: Delay::new(Duration::from_millis(0)),
 			average_hop_delay: Duration::from_millis(config.average_message_delay_ms as u64),
 			average_traffic_delay,
@@ -265,18 +265,20 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			self.current_window,
 			established,
 		);
-		self.pending_connected_peers.insert(peer, connection);
+		self.connected_peers.insert(peer, connection);
 	}
 
-	pub fn pending_connected_mut(&mut self, peer: &NetworkPeerId) -> Option<&mut C> {
-		self.pending_connected_peers.get_mut(peer).map(|c| &mut c.connection)
+	pub fn connected_mut(&mut self, peer: &NetworkPeerId) -> Option<&mut C> {
+		self.connected_peers.get_mut(peer).map(|c| &mut c.connection)
 	}
 
 	pub(crate) fn managed_connection_mut(
 		&mut self,
 		peer: &MixPeerId,
 	) -> Option<&mut ManagedConnection<C>> {
-		self.connected_peers.get_mut(peer)
+		self.handshaken_peers
+			.get(peer)
+			.and_then(|peer| self.connected_peers.get_mut(peer))
 	}
 
 	pub fn local_id(&self) -> &MixPeerId {
@@ -289,7 +291,11 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		data: Packet,
 		delay: Duration,
 	) -> Result<(), Error> {
-		if let Some(connection) = self.connected_peers.get_mut(&recipient) {
+		if let Some(connection) = self
+			.handshaken_peers
+			.get(&recipient)
+			.and_then(|r| self.connected_peers.get_mut(r))
+		{
 			let deadline = Some(self.last_now + delay); // TODO could get now from param
 			connection.queue_packet(
 				QueuedPacket { deadline, data },
@@ -314,7 +320,11 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 	// When node are not routing, the packet is not delayed
 	// and sent immediatly.
 	fn queue_external_packet(&mut self, recipient: MixPeerId, data: Packet) -> Result<(), Error> {
-		if let Some(connection) = self.connected_peers.get_mut(&recipient) {
+		if let Some(connection) = self
+			.handshaken_peers
+			.get(&recipient)
+			.and_then(|r| self.connected_peers.get_mut(r))
+		{
 			let deadline = Some(self.last_now); // TODO remove option for deadline (we don't want to skip other packets
 			connection.queue_packet(
 				QueuedPacket { deadline, data },
@@ -387,10 +397,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			let first_node = paths[0].0.clone();
 			let paths: Vec<_> = paths
 				.into_iter()
-				.map(|(id, key)| sphinx::PathHop {
-					id: id,
-					public_key: key.into(),
-				})
+				.map(|(id, key)| sphinx::PathHop { id, public_key: key.into() })
 				.collect();
 
 			Some((first_node, paths))
@@ -403,10 +410,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			let (first_id, _) = paths[n].first().unwrap().clone();
 			let hops: Vec<_> = paths[n]
 				.iter()
-				.map(|(id, key)| sphinx::PathHop {
-					id: id.clone(),
-					public_key: (*key).into(),
-				})
+				.map(|(id, key)| sphinx::PathHop { id: id.clone(), public_key: (*key).into() })
 				.collect();
 			let chunk_surb = if n == 0 { surb.take() } else { None };
 			let (packet, surb_keys) =
@@ -522,13 +526,11 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 	}
 
 	/// Should be called when a peer is disconnected.
-	pub fn remove_connected_peer(&mut self, id: &NetworkPeerId, connected: Option<&MixPeerId>) {
-		// TODO keep mapping to MixPeerId from NetworkPeerId and disco from network
-		if let Some(id) = connected {
-			self.connected_peers.remove(id);
-			self.topology.disconnect(id);
+	pub fn remove_connected_peer(&mut self, id: &NetworkPeerId) {
+		if let Some(mix_id) = self.connected_peers.remove(id).and_then(|c| c.mixnet_id) {
+			self.handshaken_peers.remove(&mix_id);
+			self.topology.disconnect(&mix_id);
 		}
-		self.pending_connected_peers.remove(id);
 	}
 
 	fn random_paths(
@@ -601,8 +603,11 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		let mut all_pending = true;
 		let mut disconnected = Vec::new();
 		let mut recv_packets = Vec::new();
-		let mut move_to_connected = Vec::new();
-		for (peer_id, connection) in self.pending_connected_peers.iter_mut() {
+		// TODO loop on ready
+		// and import inside (requires to split connected from other mixnet
+		// fields: would remove need for connection event received.
+
+		for (peer_id, connection) in self.connected_peers.iter_mut() {
 			// TODO futures unordered
 			match connection.poll(
 				cx,
@@ -614,66 +619,30 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 				self.last_now,
 				&mut self.topology,
 			) {
-					Poll::Ready(ConnectionEvent::Established(key)) => {
-						all_pending = false;
-						if let Some(sphinx_id) = connection.mixnet_id.clone() {
-							move_to_connected.push((connection.peer_id.clone(), sphinx_id));
-							self.topology.connected(sphinx_id.clone(), key);
-						}
-						if let Err(e) =
-							results.start_send_unpin(WorkerOut::Connected(connection.peer_id.clone(), key.clone()))
-						{
-							log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
-						}
-					},
-					Poll::Ready(ConnectionEvent::Broken) => {
-						// same as pending
-						disconnected.push((peer_id.clone(), None));
-					},
-					Poll::Ready(ConnectionEvent::Received(..)) => {
-						unreachable!();
-					},
-					Poll::Ready(ConnectionEvent::None) => {
-						all_pending = false;
-					},
-					Poll::Pending => (),
-			}
-		}
-
-
-
-		for (peer_id, mix_id) in move_to_connected.into_iter() {
-			if let Some(con) = self.pending_connected_peers.remove(&peer_id) {
-				self.connected_peers.insert(mix_id, con);
-			}
-		}
-		for (peer_id, connection) in self.connected_peers.iter_mut() {
-			// TODO loop on ready
-			// and import inside (requires to split connected from other mixnet
-			// fields: would remove need for connection event received.
-			match connection.poll(
-				cx,
-				&self.local_id,
-				&self.public,
-				self.current_window,
-				self.current_packet_in_window,
-				self.packet_per_window,
-				self.last_now,
-				&mut self.topology,
-			) {
-				Poll::Ready(ConnectionEvent::Established(..)) => {
-					unreachable!();
-				},
-				Poll::Ready(ConnectionEvent::Received(packet)) => {
+				Poll::Ready(ConnectionEvent::Established(key)) => {
 					all_pending = false;
-					recv_packets.push((peer_id.clone(), packet));
+					if let Some(sphinx_id) = connection.mixnet_id.clone() {
+						self.topology.connected(sphinx_id.clone(), key);
+					}
+					if let Err(e) = results.start_send_unpin(WorkerOut::Connected(
+						connection.peer_id.clone(),
+						key.clone(),
+					)) {
+						log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
+					}
 				},
 				Poll::Ready(ConnectionEvent::Broken) => {
 					// same as pending
-					disconnected.push((connection.peer_id.clone(), Some(peer_id.clone())));
+					disconnected.push(peer_id.clone());
 				},
 				Poll::Ready(ConnectionEvent::None) => {
 					all_pending = false;
+				},
+				Poll::Ready(ConnectionEvent::Received(packet)) => {
+					all_pending = false;
+					if let Some(sphinx_id) = connection.mixnet_id.clone() {
+						recv_packets.push((sphinx_id.clone(), packet));
+					}
 				},
 				Poll::Pending => (),
 			}
@@ -687,9 +656,9 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		}
 
 		if disconnected.len() > 0 {
-			for (peer, connected) in disconnected.iter() {
+			for peer in disconnected.iter() {
 				log::trace!(target: "mixnet", "Disconnecting peer {:?}", peer);
-				self.remove_connected_peer(peer, connected.as_ref());
+				self.remove_connected_peer(peer);
 			}
 
 			return Poll::Ready(MixEvent::Disconnected(disconnected))
@@ -897,8 +866,7 @@ where
 pub(crate) fn cover_message_to(peer_id: &MixPeerId, peer_key: MixPublicKey) -> Option<Packet> {
 	let mut rng = rand::thread_rng();
 	let message = fragment::Fragment::create_cover_fragment(&mut rng);
-	let hops =
-		vec![sphinx::PathHop { id: peer_id.clone(), public_key: peer_key.into() }];
+	let hops = vec![sphinx::PathHop { id: peer_id.clone(), public_key: peer_key.into() }];
 	let (packet, _no_surb) = sphinx::new_packet(&mut rng, hops, message.into_vec(), None).ok()?;
 	Some(packet)
 }

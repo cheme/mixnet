@@ -60,11 +60,7 @@ impl fmt::Display for Error {
 		match self {
 			Error::MessageTooLarge => write!(f, "Mix message is too large."),
 			Error::SphinxError(e) => write!(f, "Sphinx packet format error: {:?}.", e),
-			Error::NoPath(p) => write!(
-				f,
-				"No path to {:?}.",
-				p
-			),
+			Error::NoPath(p) => write!(f, "No path to {:?}.", p),
 			Error::NotEnoughRoutingPeers => write!(f, "Not enough routing peers."),
 			Error::InvalidId(id) => write!(f, "Invalid peer id: {}.", id),
 			Error::InvalidSphinxId(id) =>

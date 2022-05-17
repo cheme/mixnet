@@ -201,7 +201,7 @@ pub trait Topology: Sized + Send + 'static {
 	/// On disconnect.
 	fn disconnect(&mut self, id: &MixPeerId);
 
-/*	/// On handshake, can extract peer id and publickey.
+	/*	/// On handshake, can extract peer id and publickey.
 	fn handshake(&mut self, payload: &[u8]) -> Option<(MixPeerId, MixPublicKey)>;*/
 }
 

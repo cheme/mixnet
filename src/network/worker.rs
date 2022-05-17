@@ -114,7 +114,7 @@ impl<T: Topology> MixnetWorker<T> {
 					return Poll::Ready(true)
 				},
 				WorkerIn::AddPeer(peer, inbound, outbound, handler, established) => {
-					if let Some(_con) = self.mixnet.pending_connected_mut(&peer) {
+					if let Some(_con) = self.mixnet.connected_mut(&peer) {
 						log::error!("Trying to replace an existing connection for {:?}", peer);
 					} else {
 						let con = Connection::new(handler, inbound, outbound);
@@ -139,7 +139,7 @@ impl<T: Topology> MixnetWorker<T> {
 					log::trace!(target: "mixnet", "added peer out: {:?}", peer);
 				},
 				WorkerIn::AddPeerInbound(peer, inbound) => {
-					if let Some(con) = self.mixnet.pending_connected_mut(&peer) {
+					if let Some(con) = self.mixnet.connected_mut(&peer) {
 						log::trace!(target: "mixnet", "Added inbound to peer: {:?}", peer);
 						con.set_inbound(inbound);
 					} else {
@@ -168,7 +168,7 @@ impl<T: Topology> MixnetWorker<T> {
 			match e {
 				MixEvent::None => (),
 				MixEvent::Disconnected(peers) =>
-					for (peer, _) in peers.into_iter() {
+					for peer in peers.into_iter() {
 						if let Err(e) =
 							self.worker_out.start_send_unpin(WorkerOut::Disconnected(peer))
 						{
@@ -187,7 +187,7 @@ impl<T: Topology> MixnetWorker<T> {
 		if let Err(e) = self.worker_out.start_send_unpin(WorkerOut::Disconnected(peer.clone())) {
 			log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
 		}
-		self.mixnet.remove_connected_peer(peer, None);
+		self.mixnet.remove_connected_peer(peer);
 	}
 
 	fn import_packet(&mut self, peer: crate::MixPeerId, packet: Packet) -> bool {

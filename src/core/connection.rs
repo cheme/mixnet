@@ -55,7 +55,7 @@ pub(crate) enum ConnectionEvent {
 }
 
 pub(crate) struct ManagedConnection<C> {
-	pub(crate) connection: C, // TODO priv
+	pub(crate) connection: C,                // TODO priv
 	pub(crate) mixnet_id: Option<MixPeerId>, // TODO priv
 	pub(crate) peer_id: libp2p_core::PeerId, // TODO priv and rename to network_id
 	handshake_sent: bool,
@@ -315,9 +315,8 @@ impl<C: Connection> ManagedConnection<C> {
 							//break;
 							if let Some(key) = self.public_key.clone() {
 								if topology.routing_to(local_id, &peer_id) {
-									self.next_packet =
-										crate::core::cover_message_to(&peer_id, key)
-											.map(|p| p.into_vec());
+									self.next_packet = crate::core::cover_message_to(&peer_id, key)
+										.map(|p| p.into_vec());
 								} else {
 									break
 								}

@@ -20,11 +20,9 @@
 
 // libp2p connection handler for the mixnet protocol.
 
-use crate::{
-	network::{protocol, WorkerIn, WorkerSink},
-};
+use crate::network::{protocol, WorkerIn, WorkerSink};
 use futures::prelude::*;
-use libp2p_core::{upgrade::NegotiationError, UpgradeError, PeerId};
+use libp2p_core::{upgrade::NegotiationError, PeerId, UpgradeError};
 use libp2p_swarm::{
 	ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive,
 	NegotiatedSubstream, SubstreamProtocol,
