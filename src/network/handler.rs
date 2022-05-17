@@ -22,10 +22,9 @@
 
 use crate::{
 	network::{protocol, WorkerIn, WorkerSink},
-	MixPeerId,
 };
 use futures::prelude::*;
-use libp2p_core::{upgrade::NegotiationError, UpgradeError};
+use libp2p_core::{upgrade::NegotiationError, UpgradeError, PeerId};
 use libp2p_swarm::{
 	ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive,
 	NegotiatedSubstream, SubstreamProtocol,
@@ -101,7 +100,7 @@ pub struct Handler {
 	/// Outbound sink.
 	outbound: Option<NegotiatedSubstream>,
 
-	peer_id: Option<MixPeerId>,
+	peer_id: Option<PeerId>,
 	/// Tracks the state of our handler.
 	state: State,
 	/// Send connection to worker.
@@ -148,7 +147,7 @@ impl Handler {
 		self.established = Some(established);
 	}
 
-	pub(crate) fn set_peer_id(&mut self, peer_id: MixPeerId) {
+	pub(crate) fn set_peer_id(&mut self, peer_id: PeerId) {
 		self.peer_id = Some(peer_id);
 	}
 }
@@ -202,7 +201,7 @@ impl Handler {
 }
 
 impl ConnectionHandler for Handler {
-	type InEvent = MixPeerId;
+	type InEvent = PeerId;
 	type OutEvent = ();
 	type Error = Failure;
 	type InboundProtocol = protocol::Mixnet;
@@ -228,7 +227,7 @@ impl ConnectionHandler for Handler {
 		self.try_send_connected();
 	}
 
-	fn inject_event(&mut self, peer: MixPeerId) {
+	fn inject_event(&mut self, peer: PeerId) {
 		if self.peer_id.is_none() {
 			self.peer_id = Some(peer);
 			self.try_send_connected();

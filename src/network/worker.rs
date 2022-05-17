@@ -26,7 +26,7 @@ use std::collections::VecDeque;
 use crate::{
 	core::{Config, MixEvent, MixPublicKey, Mixnet, Packet, SurbsPayload, Topology},
 	network::connection::Connection,
-	MessageType, MixPeerId, SendOptions,
+	MessageType, SendOptions,
 };
 use futures::{
 	channel::{mpsc::SendError, oneshot::Sender as OneShotSender},
@@ -41,24 +41,24 @@ pub type WorkerSink = Box<dyn Sink<WorkerOut, Error = SendError> + Unpin + Send>
 pub type ConnectionEstablished = Option<OneShotSender<()>>;
 
 pub enum WorkerIn {
-	RegisterMessage(Option<MixPeerId>, Vec<u8>, SendOptions),
+	RegisterMessage(Option<PeerId>, Vec<u8>, SendOptions),
 	RegisterSurbs(Vec<u8>, SurbsPayload),
 	AddPeer(
-		MixPeerId,
+		PeerId,
 		Option<NegotiatedSubstream>,
 		NegotiatedSubstream,
 		OneShotSender<()>,
 		ConnectionEstablished,
 	),
-	AddPeerInbound(MixPeerId, NegotiatedSubstream),
-	RemoveConnectedPeer(MixPeerId),
-	ImportExternalMessage(MixPeerId, Packet),
+	AddPeerInbound(PeerId, NegotiatedSubstream),
+	RemoveConnectedPeer(PeerId),
+	ImportExternalMessage(PeerId, Packet),
 }
 
 // TODO consider simple mutex on peer connections.
 pub enum WorkerOut {
 	/// Message received from mixnet.
-	ReceivedMessage(MixPeerId, Vec<u8>, MessageType),
+	ReceivedMessage(PeerId, Vec<u8>, MessageType),
 	/// Handshake success in mixnet.
 	Connected(PeerId, MixPublicKey),
 	/// Peer connection dropped, sending info to behaviour for
@@ -76,7 +76,7 @@ pub struct MixnetWorker<T> {
 
 	// TODO move to Connection or at least add a delay here and drop if no connection
 	// after deley.
-	queue_packets: VecDeque<(MixPeerId, Vec<u8>)>,
+	queue_packets: VecDeque<(PeerId, Vec<u8>)>,
 }
 
 impl<T: Topology> MixnetWorker<T> {
@@ -86,11 +86,11 @@ impl<T: Topology> MixnetWorker<T> {
 		MixnetWorker { mixnet, worker_in, worker_out, queue_packets: Default::default() }
 	}
 
-	pub fn local_id(&self) -> &MixPeerId {
+	pub fn local_id(&self) -> &PeerId {
 		self.mixnet.local_id()
 	}
 
-	pub fn change_peer_limit_window(&mut self, peer: &MixPeerId, new_limit: Option<u32>) {
+	pub fn change_peer_limit_window(&mut self, peer: &PeerId, new_limit: Option<u32>) {
 		if let Some(con) = self.mixnet.managed_connection_mut(peer) {
 			con.change_limit_msg(new_limit);
 		}
@@ -194,7 +194,7 @@ impl<T: Topology> MixnetWorker<T> {
 		result
 	}
 
-	fn disconnect_peer(&mut self, peer: &MixPeerId) {
+	fn disconnect_peer(&mut self, peer: &PeerId) {
 		log::trace!(target: "mixnet", "Disconnecting peer {:?}", peer);
 		log::error!(target: "mixnet", "Disconnecting peer {:?}", peer);
 		if let Err(e) = self.worker_out.start_send_unpin(WorkerOut::Disconnected(peer.clone())) {
@@ -203,7 +203,7 @@ impl<T: Topology> MixnetWorker<T> {
 		self.mixnet.remove_connected_peer(peer);
 	}
 
-	fn import_packet(&mut self, peer: MixPeerId, packet: Packet) -> bool {
+	fn import_packet(&mut self, peer: PeerId, packet: Packet) -> bool {
 		match self.mixnet.import_message(peer, packet) {
 			Ok(Some((full_message, surb))) => {
 				if let Err(e) = self.worker_out.start_send_unpin(WorkerOut::ReceivedMessage(

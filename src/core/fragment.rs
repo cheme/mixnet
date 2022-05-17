@@ -37,6 +37,23 @@ type MessageHash = [u8; 32];
 
 /// Target fragment size. Includes the header and the payload.
 pub const FRAGMENT_PACKET_SIZE: usize = 2048;
+const FRAGMENT_HEADER_SIZE: usize = 4 + 32;
+const FRAGMENT_FIRST_CHUNK_HEADER_SIZE: usize = FRAGMENT_HEADER_SIZE + 32 + 4;
+const FRAGMENT_PAYLOAD_SIZE: usize = FRAGMENT_PACKET_SIZE - FRAGMENT_HEADER_SIZE;
+const FRAGMENT_FIRST_CHUNK_PAYLOAD_SIZE: usize =
+	FRAGMENT_PACKET_SIZE - FRAGMENT_FIRST_CHUNK_HEADER_SIZE;
+const MAX_MESSAGE_SIZE: usize = 256 * 1024;
+
+const FRAGMENT_EXPIRATION_MS: u64 = 10000;
+
+const COVER_TAG: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
+
+// hash is using tag as iv to avoid collision.
+fn hash(iv: &[u8], data: &[u8]) -> MessageHash {
+	let mut r = MessageHash::default();
+	r.copy_from_slice(blake2_rfc::blake2b::blake2b(32, iv, data).as_bytes());
+	r
+}
 
 /// Fragment.
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -144,25 +161,6 @@ impl Fragment {
 	pub fn into_vec(self) -> Vec<u8> {
 		self.buf
 	}
-}
-
-const FRAGMENT_HEADER_SIZE: usize = 4 + 32;
-const FRAGMENT_FIRST_CHUNK_HEADER_SIZE: usize = FRAGMENT_HEADER_SIZE + 32 + 4;
-const FRAGMENT_PAYLOAD_SIZE: usize = FRAGMENT_PACKET_SIZE - FRAGMENT_HEADER_SIZE;
-const FRAGMENT_FIRST_CHUNK_PAYLOAD_SIZE: usize =
-	FRAGMENT_PACKET_SIZE - FRAGMENT_FIRST_CHUNK_HEADER_SIZE;
-const MAX_MESSAGE_SIZE: usize = 256 * 1024;
-
-const FRAGMENT_EXPIRATION_MS: u64 = 10000;
-
-// TODO remove this tag, make cover a command in header and don't open payload?
-const COVER_TAG: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
-
-// hash is using tag as iv to avoid collision.
-fn hash(iv: &[u8], data: &[u8]) -> MessageHash {
-	let mut r = MessageHash::default();
-	r.copy_from_slice(blake2_rfc::blake2b::blake2b(32, iv, data).as_bytes());
-	r
 }
 
 struct IncompleteMessage {

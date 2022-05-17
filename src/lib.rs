@@ -35,6 +35,8 @@ pub use network::{
 
 /// Mixnet peer identity.
 pub type MixPeerId = libp2p_core::PeerId;
+/// Mixnet network identity.
+pub type NetworkPeerId = libp2p_core::PeerId;
 
 /// Options for sending a message in the mixnet.
 pub struct SendOptions {
