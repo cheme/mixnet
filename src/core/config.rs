@@ -76,4 +76,26 @@ impl Config {
 			persist_surb_query: true,
 		}
 	}
+
+	pub fn new(id: MixPeerId) -> Self {
+		let mut secret = [0u8; 32];
+		use rand::RngCore;
+		rand::thread_rng().fill_bytes(&mut secret);
+		let secret_key: x25519_dalek::StaticSecret = secret.into();
+		let public_key = x25519_dalek::PublicKey::from(&secret_key);
+		Self {
+			secret_key,
+			public_key,
+			local_id: id,
+			target_bits_per_second: 128 * 1024,
+			timeout_ms: 5000,
+			num_hops: 3,
+			average_message_delay_ms: 500,
+			limit_per_window: Some((WINDOW_BACKPRESSURE.as_millis() as u32 / 250) * 2),
+			surb_ttl_ms: 100_000,
+			replay_ttl_ms: 100_000,
+			persist_surb_query: true,
+		}
+	}
+
 }
