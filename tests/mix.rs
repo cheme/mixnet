@@ -51,6 +51,10 @@ struct TopologyGraph {
 	external: Option<MixPeerId>,
 	nb_connected: Arc<AtomicUsize>,
 	local_id: Option<MixPeerId>,
+	local_network_id: Option<PeerId>,
+	// key for signing handshake (assert mix_pub_key, MixPeerId is related to
+	// MixPublicKey by signing it (and also dest MixPublicKey to avoid replay).
+	mix_secret_key: Option<Arc<(ed25519_dalek::ExpandedSecretKey, ed25519_dalek::PublicKey)>>,
 }
 
 impl TopologyGraph {
@@ -73,6 +77,8 @@ impl TopologyGraph {
 			external: Default::default(),
 			nb_connected: Arc::new(0.into()),
 			local_id: None,
+			local_network_id: None,
+			mix_secret_key: None,
 		}
 	}
 }
@@ -142,7 +148,7 @@ impl mixnet::Topology for TopologyGraph {
 	}
 
 	fn handshake_size(&self) -> usize {
-		64
+		32 + 32 + 64
 	}
 	fn check_handshake(
 		&mut self,
@@ -153,14 +159,33 @@ impl mixnet::Topology for TopologyGraph {
 		peer_id.copy_from_slice(&payload[0..32]);
 //		let peer_id = mixnet::to_sphinx_id(&payload[0..32]).ok()?;
 		let mut pk = [0u8; 32];
-		pk.copy_from_slice(&payload[32..]);
-		let pk = MixPublicKey::from(pk);
-		Some((peer_id, pk))
+		pk.copy_from_slice(&payload[32..64]);
+		let mut signature = [0u8; 64];
+		signature.copy_from_slice(&payload[64..]);
+		let signature = ed25519_dalek::Signature::new(signature);
+		let pub_key = ed25519_dalek::PublicKey::from_bytes(&peer_id[..]).unwrap();
+		let mut message = self.local_network_id.unwrap().to_bytes().to_vec();
+		message.extend_from_slice(&pk[..]);
+		use ed25519_dalek::Verifier;
+		if pub_key.verify(&message[..], &signature).is_ok() {
+			let pk = MixPublicKey::from(pk);
+			Some((peer_id, pk))
+		} else {
+			None
+		}
 	}
-	fn handshake(&mut self, _with: &PeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
+	fn handshake(&mut self, with: &PeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
 		let mut result = self.local_id.as_ref().unwrap().to_vec();
 		// TODO need to sign public key with local id
 		result.extend_from_slice(&public_key.as_bytes()[..]);
+		if let Some(keypair) = &self.mix_secret_key {
+			let mut message = with.to_bytes().to_vec();
+			message.extend_from_slice(&public_key.as_bytes()[..]);
+			let signature = keypair.0.sign(&message[..], &keypair.1);
+			result.extend_from_slice(&signature.to_bytes()[..]);
+		} else {
+			return None;
+		}
 		Some(result)
 	}
 }
@@ -198,9 +223,10 @@ fn test_messages(
 		rand::thread_rng().fill_bytes(&mut secret_mix);
 		let mix_secret_key = ed25519_dalek::SecretKey::from_bytes(&secret_mix[..]).unwrap();
 		let mix_public_key: ed25519_dalek::PublicKey = (&mix_secret_key).into();
+		let mix_secret_key: ed25519_dalek::ExpandedSecretKey = (&mix_secret_key).into();
 		let mix_id = mix_public_key.to_bytes();
 		nodes.push((mix_id, peer_public_key.clone()));
-		network_ids.push(peer_id);
+		network_ids.push((peer_id, Arc::new((mix_secret_key, mix_public_key))));
 		secrets.push(peer_secret_key);
 		transports.push(trans);
 	}
@@ -252,6 +278,8 @@ fn test_messages(
 		let mut counter = Arc::new(AtomicUsize::new(0));
 		topo.nb_connected = counter.clone();
 		topo.local_id = Some(id.clone());
+		topo.local_network_id = Some(network_ids[i].0.clone());
+		topo.mix_secret_key = Some(network_ids[i].1.clone());
 		count_connection.push(counter);
 		let mut worker = Arc::new(Mutex::new(mixnet::MixnetWorker::new(
 			cfg,
@@ -270,7 +298,7 @@ fn test_messages(
 			}
 		});
 		executor.spawn(worker).unwrap();
-		let mut swarm = Swarm::new(trans, mixnet, network_ids[i].clone());
+		let mut swarm = Swarm::new(trans, mixnet, network_ids[i].0.clone());
 
 		let addr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
 		swarm.listen_on(addr).unwrap();
