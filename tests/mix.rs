@@ -142,21 +142,26 @@ impl mixnet::Topology for TopologyGraph {
 	}
 
 	fn handshake_size(&self) -> usize {
-		32
+		64
 	}
 	fn check_handshake(
 		&mut self,
 		payload: &[u8],
 		from: &PeerId,
 	) -> Option<(MixPeerId, MixPublicKey)> {
-		let peer_id = mixnet::to_sphinx_id(from).ok()?;
+		let mut peer_id = [0u8; 32];
+		peer_id.copy_from_slice(&payload[0..32]);
+//		let peer_id = mixnet::to_sphinx_id(&payload[0..32]).ok()?;
 		let mut pk = [0u8; 32];
-		pk.copy_from_slice(&payload[..]);
+		pk.copy_from_slice(&payload[32..]);
 		let pk = MixPublicKey::from(pk);
 		Some((peer_id, pk))
 	}
 	fn handshake(&mut self, _with: &PeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
-		Some(public_key.to_bytes().to_vec())
+		let mut result = self.local_id.as_ref().unwrap().to_vec();
+		// TODO need to sign public key with local id
+		result.extend_from_slice(&public_key.as_bytes()[..]);
+		Some(result)
 	}
 }
 
@@ -189,7 +194,11 @@ fn test_messages(
 		rand::thread_rng().fill_bytes(&mut secret);
 		let peer_secret_key: x25519_dalek::StaticSecret = secret.into();
 		let peer_public_key = x25519_dalek::PublicKey::from(&peer_secret_key);
-		let mix_id = mixnet::to_sphinx_id(&peer_id).unwrap();
+		let mut secret_mix = [0u8; 32];
+		rand::thread_rng().fill_bytes(&mut secret_mix);
+		let mix_secret_key = ed25519_dalek::SecretKey::from_bytes(&secret_mix[..]).unwrap();
+		let mix_public_key: ed25519_dalek::PublicKey = (&mix_secret_key).into();
+		let mix_id = mix_public_key.to_bytes();
 		nodes.push((mix_id, peer_public_key.clone()));
 		network_ids.push(peer_id);
 		secrets.push(peer_secret_key);
