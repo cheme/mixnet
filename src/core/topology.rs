@@ -20,7 +20,7 @@
 
 //! Mixnet topology interface.
 
-use crate::{Error, MixPeerId, MixPublicKey};
+use crate::{core::NetworkPeerId, Error, MixPeerId, MixPublicKey};
 use rand::Rng;
 
 /// Provide network topology information to the mixnet.
@@ -201,8 +201,18 @@ pub trait Topology: Sized + Send + 'static {
 	/// On disconnect.
 	fn disconnect(&mut self, id: &MixPeerId);
 
-	/*	/// On handshake, can extract peer id and publickey.
-	fn handshake(&mut self, payload: &[u8]) -> Option<(MixPeerId, MixPublicKey)>;*/
+	fn handshake_size(&self) -> usize;
+
+	fn check_handshake(
+		&mut self,
+		payload: &[u8],
+		from: &NetworkPeerId,
+	) -> Option<(MixPeerId, MixPublicKey)>;
+
+	/// On handshake, can extract peer id and publickey.
+	///
+	/// Return None if peer is filtered by network id.
+	fn handshake(&mut self, with: &NetworkPeerId, public_key: &MixPublicKey) -> Option<Vec<u8>>;
 }
 
 fn gen_paths<T: Topology>(
@@ -311,5 +321,22 @@ impl Topology for NoTopology {
 	}
 	fn disconnect(&mut self, id: &MixPeerId) {
 		self.connected_peers.remove(id);
+	}
+	fn handshake_size(&self) -> usize {
+		32
+	}
+	fn check_handshake(
+		&mut self,
+		payload: &[u8],
+		from: &NetworkPeerId,
+	) -> Option<(MixPeerId, MixPublicKey)> {
+		let peer_id = crate::core::to_sphinx_id(from).ok()?;
+		let mut pk = [0u8; crate::core::PUBLIC_KEY_LEN];
+		pk.copy_from_slice(&payload[..]);
+		let pk = MixPublicKey::from(pk);
+		Some((peer_id, pk))
+	}
+	fn handshake(&mut self, _with: &NetworkPeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
+		Some(public_key.to_bytes().to_vec())
 	}
 }

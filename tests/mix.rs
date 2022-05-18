@@ -39,21 +39,21 @@ use std::{
 	task::Poll,
 };
 
-use mixnet::{Error, MixPublicKey, SendOptions};
+use mixnet::{Error, MixPublicKey, SendOptions, MixPeerId};
 
 #[derive(Clone)]
 struct TopologyGraph {
-	connections: HashMap<PeerId, Vec<(PeerId, MixPublicKey)>>, /* TODO remove field, peers is
+	connections: HashMap<MixPeerId, Vec<(MixPeerId, MixPublicKey)>>, /* TODO remove field, peers is
 	                                                            * enough? */
-	peers: Vec<(PeerId, MixPublicKey)>,
+	peers: Vec<(MixPeerId, MixPublicKey)>,
 	// allow single external
-	external: Option<PeerId>,
+	external: Option<MixPeerId>,
 	nb_connected: Arc<AtomicUsize>,
-	local_id: Option<PeerId>,
+	local_id: Option<MixPeerId>,
 }
 
 impl TopologyGraph {
-	fn new_star(nodes: &[(PeerId, MixPublicKey)]) -> Self {
+	fn new_star(nodes: &[(MixPeerId, MixPublicKey)]) -> Self {
 		let mut connections = HashMap::new();
 		for i in 0..nodes.len() {
 			let (node, _node_key) = nodes[i];
@@ -77,24 +77,24 @@ impl TopologyGraph {
 }
 
 impl mixnet::Topology for TopologyGraph {
-	fn neighbors(&self, id: &PeerId) -> Option<Vec<(PeerId, MixPublicKey)>> {
+	fn neighbors(&self, id: &MixPeerId) -> Option<Vec<(MixPeerId, MixPublicKey)>> {
 		self.connections.get(id).cloned()
 	}
 
-	fn first_hop_nodes(&self) -> Vec<(PeerId, MixPublicKey)> {
+	fn first_hop_nodes(&self) -> Vec<(MixPeerId, MixPublicKey)> {
 		self.peers.clone()
 	}
 
-	fn first_hop_nodes_external(&self, _from: &PeerId) -> Vec<(PeerId, MixPublicKey)> {
+	fn first_hop_nodes_external(&self, _from: &MixPeerId) -> Vec<(MixPeerId, MixPublicKey)> {
 		// allow only with peer 0
 		vec![self.peers[0].clone()]
 	}
 
-	fn is_first_node(&self, id: &PeerId) -> bool {
+	fn is_first_node(&self, id: &MixPeerId) -> bool {
 		self.peers.iter().find(|(p, _)| p == id).is_some()
 	}
 
-	fn random_recipient(&self, local_id: &PeerId) -> Option<(PeerId, MixPublicKey)> {
+	fn random_recipient(&self, local_id: &MixPeerId) -> Option<(MixPeerId, MixPublicKey)> {
 		self.peers
 			.iter()
 			.filter(|(k, _v)| k != local_id)
@@ -102,7 +102,7 @@ impl mixnet::Topology for TopologyGraph {
 			.map(|(k, v)| (k.clone(), v.clone()))
 	}
 
-	fn routing_to(&self, from: &PeerId, to: &PeerId) -> bool {
+	fn routing_to(&self, from: &MixPeerId, to: &MixPeerId) -> bool {
 		if self.external.as_ref() == Some(to) {
 			// this is partly incorrect as we also need to check that from is self.
 			return self.local_id.as_ref() == Some(from)
@@ -114,7 +114,7 @@ impl mixnet::Topology for TopologyGraph {
 			.is_some()
 	}
 
-	fn connected(&mut self, _: PeerId, _: MixPublicKey) {
+	fn connected(&mut self, _: MixPeerId, _: MixPublicKey) {
 		self.nb_connected.fetch_add(1, Ordering::Relaxed);
 
 		if self.nb_connected.load(Ordering::Relaxed) == self.connections.len() - 1 {
@@ -122,14 +122,14 @@ impl mixnet::Topology for TopologyGraph {
 		}
 	}
 
-	fn disconnect(&mut self, id: &PeerId) {
+	fn disconnect(&mut self, id: &MixPeerId) {
 		self.nb_connected.fetch_sub(1, Ordering::Relaxed);
 		if self.external.as_ref() == Some(id) {
 			self.external = None;
 		}
 	}
 
-	fn allow_external(&mut self, id: &PeerId) -> Option<(usize, usize)> {
+	fn allow_external(&mut self, id: &MixPeerId) -> Option<(usize, usize)> {
 		if self.external.as_ref() == Some(id) {
 			return Some((1, 1))
 		}
@@ -138,6 +138,24 @@ impl mixnet::Topology for TopologyGraph {
 		}
 		self.external = Some(id.clone());
 		Some((1, 1))
+	}
+
+	fn handshake_size(&self) -> usize {
+		32
+	}
+	fn check_handshake(
+		&mut self,
+		payload: &[u8],
+		from: &PeerId,
+	) -> Option<(MixPeerId, MixPublicKey)> {
+		let peer_id = mixnet::to_sphinx_id(from).ok()?;
+		let mut pk = [0u8; 32];
+		pk.copy_from_slice(&payload[..]);
+		let pk = MixPublicKey::from(pk);
+		Some((peer_id, pk))
+	}
+	fn handshake(&mut self, _with: &PeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
+		Some(public_key.to_bytes().to_vec())
 	}
 }
 
@@ -160,13 +178,16 @@ fn test_messages(
 		0
 	};
 	let mut nodes = Vec::new();
+	let mut network_ids = Vec::new();
 	let mut secrets = Vec::new();
 	let mut transports = Vec::new();
 	for _ in 0..num_peers + extra_external {
 		let (peer_id, peer_key, trans) = mk_transport();
 		let peer_key_montgomery = mixnet::public_from_ed25519(&peer_key.public());
 		let peer_secret_key = mixnet::secret_from_ed25519(&peer_key.secret());
-		nodes.push((peer_id.clone(), peer_key_montgomery.clone()));
+		let mix_id = mixnet::to_sphinx_id(&peer_id).unwrap();
+		nodes.push((mix_id, peer_key_montgomery.clone()));
+		network_ids.push(peer_id);
 		secrets.push(peer_secret_key);
 		transports.push(trans);
 	}
@@ -236,7 +257,7 @@ fn test_messages(
 			}
 		});
 		executor.spawn(worker).unwrap();
-		let mut swarm = Swarm::new(trans, mixnet, id.clone());
+		let mut swarm = Swarm::new(trans, mixnet, network_ids[i].clone());
 
 		let addr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
 		swarm.listen_on(addr).unwrap();
@@ -361,7 +382,7 @@ fn test_messages(
 		let (_, mut sender) = swarms.remove(index);
 		for np in 1..num_peers {
 			let (recipient, _) = nodes[np];
-			log::trace!(target: "mixnet", "0: Sending {} messages to {}", message_count, recipient);
+			log::trace!(target: "mixnet", "0: Sending {} messages to {:?}", message_count, recipient);
 			for _ in 0..message_count {
 				sender
 					.behaviour_mut()

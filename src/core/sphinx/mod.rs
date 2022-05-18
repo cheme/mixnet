@@ -558,7 +558,9 @@ mod test {
 
 		let keypair = libp2p_core::identity::Keypair::generate_ed25519();
 		let config = if let libp2p_core::identity::Keypair::Ed25519(kp) = &keypair {
-			crate::Config::new_with_ed25519_keypair(&kp, keypair.public().clone().into())
+			let network_id = keypair.public().clone().into();
+			let id = crate::core::to_sphinx_id(&network_id).unwrap();
+			crate::Config::new_with_ed25519_keypair(&kp, id)
 		} else {
 			unreachable!()
 		};

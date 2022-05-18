@@ -21,7 +21,7 @@
 //! Mixnet connection interface.
 
 use crate::{
-	core::{QueuedPacket, PUBLIC_KEY_LEN, WINDOW_MARGIN_PERCENT},
+	core::{QueuedPacket, WINDOW_MARGIN_PERCENT, NetworkPeerId},
 	MixPeerId, MixPublicKey, Packet, Topology, PACKET_SIZE,
 };
 use futures::{channel::oneshot::Sender as OneShotSender, FutureExt};
@@ -57,9 +57,9 @@ pub(crate) enum ConnectionEvent {
 pub(crate) struct ManagedConnection<C> {
 	pub(crate) connection: C,                // TODO priv
 	pub(crate) mixnet_id: Option<MixPeerId>, // TODO priv
-	pub(crate) peer_id: libp2p_core::PeerId, // TODO priv and rename to network_id
+	pub(crate) peer_id: NetworkPeerId, // TODO priv and rename to network_id + TODO could be part of connection
 	handshake_sent: bool,
-	public_key: Option<MixPublicKey>,
+	public_key: Option<MixPublicKey>, // TODO useless at this level
 	// Real messages queue, sorted by deadline.
 	packet_queue: BinaryHeap<QueuedPacket>,
 	next_packet: Option<Vec<u8>>,
@@ -77,7 +77,7 @@ pub(crate) struct ManagedConnection<C> {
 
 impl<C: Connection> ManagedConnection<C> {
 	pub fn new(
-		peer_id: libp2p_core::PeerId,
+		peer_id: NetworkPeerId,
 		limit_msg: Option<u32>,
 		connection: C,
 		current_window: Wrapping<usize>,
@@ -118,9 +118,16 @@ impl<C: Connection> ManagedConnection<C> {
 		&mut self,
 		cx: &mut Context,
 		public_key: &MixPublicKey,
+		topology: &mut impl Topology,
 	) -> Poll<Result<(), ()>> {
 		if !self.handshake_sent {
-			if self.connection.try_send(public_key.to_bytes().to_vec()).is_none() {
+			let handshake = if let Some(handshake) = topology.handshake(&self.peer_id, public_key) {
+				handshake
+			} else {
+				log::trace!(target: "mixnet", "Cannot create handshake with {}", self.peer_id);
+				return Poll::Ready(Err(()))
+			};
+			if self.connection.try_send(handshake).is_none() {
 				self.handshake_sent = true;
 			} else {
 				unreachable!("Handshak is first connection send");
@@ -163,22 +170,25 @@ impl<C: Connection> ManagedConnection<C> {
 		self.connection.try_send(packet)
 	}
 
-	fn try_recv_handshake(&mut self, cx: &mut Context) -> Poll<Result<MixPublicKey, ()>> {
+	fn try_recv_handshake(&mut self, cx: &mut Context, topology: &mut impl Topology) -> Poll<Result<MixPublicKey, ()>> {
 		if self.handshake_received() {
 			// ignore
 			return Poll::Pending
 		}
-		match self.connection.try_recv(cx, PUBLIC_KEY_LEN) {
-			Poll::Ready(Ok(Some(key))) => {
+		match self.connection.try_recv(cx, topology.handshake_size()) {
+			Poll::Ready(Ok(Some(handshake))) => {
 				self.read_timeout.reset(READ_TIMEOUT); // TODO remove this read_timeout
 				log::trace!(target: "mixnet", "Handshake message from {:?}", self.peer_id);
-				let mut pk = [0u8; PUBLIC_KEY_LEN];
-				pk.copy_from_slice(&key[..]);
-				let pk = MixPublicKey::from(pk);
-				self.public_key = Some(pk.clone()); // TODO is public key needed: just bool?
-				Poll::Ready(Ok(pk))
+				if let Some((peer_id, pk)) = topology.check_handshake(handshake.as_slice(), &self.peer_id) {
+					self.mixnet_id = Some(peer_id);
+					self.public_key = Some(pk.clone()); // TODO is public key needed: just bool?
+					Poll::Ready(Ok(pk))
+				} else {
+					log::trace!(target: "mixnet", "Invalid handshake from peer, closing: {:?}", self.peer_id);
+					Poll::Ready(Err(()))
+				}
 			},
-			Poll::Ready(Ok(None)) => self.try_recv_handshake(cx),
+			Poll::Ready(Ok(None)) => self.try_recv_handshake(cx, topology),
 			Poll::Ready(Err(())) => {
 				log::trace!(target: "mixnet", "Error receiving handshake from peer, closing: {:?}", self.peer_id);
 				Poll::Ready(Err(()))
@@ -266,7 +276,7 @@ impl<C: Connection> ManagedConnection<C> {
 		let mut result = Poll::Pending;
 		if !self.is_ready() {
 			let mut result = Poll::Pending;
-			match self.try_recv_handshake(cx) {
+			match self.try_recv_handshake(cx, topology) {
 				Poll::Ready(Ok(key)) => {
 					self.current_window = current_window;
 					self.sent_in_window = current_packet_in_window;
@@ -277,7 +287,7 @@ impl<C: Connection> ManagedConnection<C> {
 				Poll::Ready(Err(())) => return Poll::Ready(ConnectionEvent::Broken),
 				Poll::Pending => (),
 			}
-			match self.try_send_handshake(cx, handshake) {
+			match self.try_send_handshake(cx, handshake, topology) {
 				Poll::Ready(Ok(())) =>
 					if matches!(result, Poll::Pending) {
 						result = Poll::Ready(ConnectionEvent::None);

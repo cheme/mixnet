@@ -108,7 +108,7 @@ pub enum MixEvent {
 	None,
 }
 
-fn to_sphinx_id(id: &NetworkPeerId) -> Result<MixPeerId, Error> {
+pub fn to_sphinx_id(id: &NetworkPeerId) -> Result<MixPeerId, Error> {
 	let hash = id.as_ref();
 	match libp2p_core::multihash::Code::try_from(hash.code()) {
 		Ok(libp2p_core::multihash::Code::Identity) => {
@@ -621,8 +621,9 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			) {
 				Poll::Ready(ConnectionEvent::Established(key)) => {
 					all_pending = false;
-					if let Some(sphinx_id) = connection.mixnet_id.clone() {
-						self.topology.connected(sphinx_id.clone(), key);
+					if let Some(sphinx_id) = connection.mixnet_id.clone() { // TODO sphinx id in message looks more proper.
+						self.handshaken_peers.insert(sphinx_id.clone(), connection.peer_id.clone());
+						self.topology.connected(sphinx_id, key);
 					}
 					if let Err(e) = results.start_send_unpin(WorkerOut::Connected(
 						connection.peer_id.clone(),
