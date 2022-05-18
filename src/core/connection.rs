@@ -21,7 +21,7 @@
 //! Mixnet connection interface.
 
 use crate::{
-	core::{QueuedPacket, WINDOW_MARGIN_PERCENT, NetworkPeerId},
+	core::{NetworkPeerId, QueuedPacket, WINDOW_MARGIN_PERCENT},
 	MixPeerId, MixPublicKey, Packet, Topology, PACKET_SIZE,
 };
 use futures::{channel::oneshot::Sender as OneShotSender, FutureExt};
@@ -57,7 +57,8 @@ pub(crate) enum ConnectionEvent {
 pub(crate) struct ManagedConnection<C> {
 	pub(crate) connection: C,                // TODO priv
 	pub(crate) mixnet_id: Option<MixPeerId>, // TODO priv
-	pub(crate) peer_id: NetworkPeerId, // TODO priv and rename to network_id + TODO could be part of connection
+	pub(crate) peer_id: NetworkPeerId,       /* TODO priv and rename to network_id + TODO could
+	                                          * be part of connection */
 	handshake_sent: bool,
 	public_key: Option<MixPublicKey>, // TODO useless at this level
 	// Real messages queue, sorted by deadline.
@@ -170,7 +171,11 @@ impl<C: Connection> ManagedConnection<C> {
 		self.connection.try_send(packet)
 	}
 
-	fn try_recv_handshake(&mut self, cx: &mut Context, topology: &mut impl Topology) -> Poll<Result<MixPublicKey, ()>> {
+	fn try_recv_handshake(
+		&mut self,
+		cx: &mut Context,
+		topology: &mut impl Topology,
+	) -> Poll<Result<MixPublicKey, ()>> {
 		if self.handshake_received() {
 			// ignore
 			return Poll::Pending
@@ -179,7 +184,9 @@ impl<C: Connection> ManagedConnection<C> {
 			Poll::Ready(Ok(Some(handshake))) => {
 				self.read_timeout.reset(READ_TIMEOUT); // TODO remove this read_timeout
 				log::trace!(target: "mixnet", "Handshake message from {:?}", self.peer_id);
-				if let Some((peer_id, pk)) = topology.check_handshake(handshake.as_slice(), &self.peer_id) {
+				if let Some((peer_id, pk)) =
+					topology.check_handshake(handshake.as_slice(), &self.peer_id)
+				{
 					self.mixnet_id = Some(peer_id);
 					self.public_key = Some(pk.clone()); // TODO is public key needed: just bool?
 					Poll::Ready(Ok(pk))

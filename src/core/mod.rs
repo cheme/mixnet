@@ -621,7 +621,8 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			) {
 				Poll::Ready(ConnectionEvent::Established(key)) => {
 					all_pending = false;
-					if let Some(sphinx_id) = connection.mixnet_id.clone() { // TODO sphinx id in message looks more proper.
+					if let Some(sphinx_id) = connection.mixnet_id.clone() {
+						// TODO sphinx id in message looks more proper.
 						self.handshaken_peers.insert(sphinx_id.clone(), connection.peer_id.clone());
 						self.topology.connected(sphinx_id, key);
 					}

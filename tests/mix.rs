@@ -39,12 +39,13 @@ use std::{
 	task::Poll,
 };
 
-use mixnet::{Error, MixPublicKey, SendOptions, MixPeerId};
+use mixnet::{Error, MixPeerId, MixPublicKey, SendOptions};
 
 #[derive(Clone)]
 struct TopologyGraph {
-	connections: HashMap<MixPeerId, Vec<(MixPeerId, MixPublicKey)>>, /* TODO remove field, peers is
-	                                                            * enough? */
+	connections: HashMap<MixPeerId, Vec<(MixPeerId, MixPublicKey)>>, /* TODO remove field, peers
+	                                                                  * is
+	                                                                  * enough? */
 	peers: Vec<(MixPeerId, MixPublicKey)>,
 	// allow single external
 	external: Option<MixPeerId>,
@@ -183,10 +184,13 @@ fn test_messages(
 	let mut transports = Vec::new();
 	for _ in 0..num_peers + extra_external {
 		let (peer_id, peer_key, trans) = mk_transport();
-		let peer_key_montgomery = mixnet::public_from_ed25519(&peer_key.public());
-		let peer_secret_key = mixnet::secret_from_ed25519(&peer_key.secret());
+		use rand::rngs::OsRng;
+		let mut secret = [0u8; 32];
+		rand::thread_rng().fill_bytes(&mut secret);
+		let peer_secret_key: x25519_dalek::StaticSecret = secret.into();
+		let peer_public_key = x25519_dalek::PublicKey::from(&peer_secret_key);
 		let mix_id = mixnet::to_sphinx_id(&peer_id).unwrap();
-		nodes.push((mix_id, peer_key_montgomery.clone()));
+		nodes.push((mix_id, peer_public_key.clone()));
 		network_ids.push(peer_id);
 		secrets.push(peer_secret_key);
 		transports.push(trans);
