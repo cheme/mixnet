@@ -84,6 +84,10 @@ impl<T: Topology> MixnetWorker<T> {
 		self.mixnet.local_id()
 	}
 
+	pub fn public_key(&self) -> &crate::MixPublicKey {
+		self.mixnet.public_key()
+	}
+
 	pub fn change_peer_limit_window(&mut self, peer: &crate::MixPeerId, new_limit: Option<u32>) {
 		if let Some(con) = self.mixnet.managed_connection_mut(peer) {
 			con.change_limit_msg(new_limit);

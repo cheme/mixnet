@@ -149,8 +149,8 @@ pub fn secret_from_ed25519(ed25519_sk: &ed25519::SecretKey) -> MixSecretKey {
 }
 
 /// Construct a Montgomery curve25519 public key from an Ed25519 public key.
-pub fn public_from_ed25519(ed25519_pk: &ed25519::PublicKey) -> MixPublicKey {
-	curve25519_dalek::edwards::CompressedEdwardsY(ed25519_pk.encode())
+pub fn public_from_ed25519(ed25519_pk: [u8; 32]) -> MixPublicKey {
+	curve25519_dalek::edwards::CompressedEdwardsY(ed25519_pk)
 		.decompress()
 		.expect("An Ed25519 public key is a valid point by construction.")
 		.to_montgomery()
@@ -283,6 +283,10 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 
 	pub fn local_id(&self) -> &MixPeerId {
 		&self.local_id
+	}
+
+	pub fn public_key(&self) -> &crate::MixPublicKey {
+		&self.public
 	}
 
 	fn queue_packet(

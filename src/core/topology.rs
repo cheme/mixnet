@@ -64,6 +64,8 @@ pub trait Topology: Sized + Send + 'static {
 
 	/// If external is allowed, it returns a ratio of
 	/// routing node bandwidth to use.
+	/// TODO have an explicit reserve external and an allow + routing_to
+	/// would need to take external pool in consideration.
 	fn allow_external(&mut self, _id: &MixPeerId) -> Option<(usize, usize)> {
 		None
 	}
@@ -249,13 +251,13 @@ pub struct NoTopology {
 }
 
 impl Topology for NoTopology {
-	fn random_recipient(&self, local_id: &MixPeerId) -> Option<(MixPeerId, MixPublicKey)> {
+	fn random_recipient(&self, from: &MixPeerId) -> Option<(MixPeerId, MixPublicKey)> {
 		use rand::prelude::IteratorRandom;
 		let mut rng = rand::thread_rng();
 		// Select a random connected peer
 		self.connected_peers
 			.iter()
-			.filter(|(k, _v)| k != &local_id)
+			.filter(|(k, _v)| k != &from)
 			.choose(&mut rng)
 			.map(|(k, v)| (k.clone(), v.clone()))
 	}

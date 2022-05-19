@@ -259,6 +259,7 @@ impl<C: Connection> ManagedConnection<C> {
 				return Err(crate::Error::QueueFull)
 			}
 			if !external && !topology.routing_to(local_id, peer_id) {
+				log::error!(target: "mixnet", "NP routing to: {:?}", local_id); // TODO rem
 				return Err(crate::Error::NoPath(Some(peer_id.clone())))
 			}
 			self.packet_queue.push(packet);
@@ -375,12 +376,12 @@ impl<C: Connection> ManagedConnection<C> {
 						packet_per_window * (100 - WINDOW_MARGIN_PERCENT) / 100;
 					if self.sent_in_window < packet_per_window_less_margin {
 						// sent not enough: dest peer is not receiving enough
-						log::trace!(target: "mixnet", "Low sent in window with {:?}", self.peer_id);
+						log::trace!(target: "mixnet", "Low sent in window with {:?}, {:?} / {:?}", self.peer_id, self.sent_in_window, packet_per_window_less_margin);
 						// TODO send info to topology
 					}
 					if self.recv_in_window < packet_per_window_less_margin {
 						// recv not enough: origin peer is not sending enough
-						log::trace!(target: "mixnet", "Low recv in window with {:?}", self.peer_id);
+						log::trace!(target: "mixnet", "Low recv in window with {:?}, {:?} / {:?}", self.peer_id, self.recv_in_window, packet_per_window_less_margin);
 						// TODO send info to topology
 					}
 				}

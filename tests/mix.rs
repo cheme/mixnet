@@ -153,11 +153,11 @@ impl mixnet::Topology for TopologyGraph {
 	fn check_handshake(
 		&mut self,
 		payload: &[u8],
-		from: &PeerId,
+		_from: &PeerId,
 	) -> Option<(MixPeerId, MixPublicKey)> {
 		let mut peer_id = [0u8; 32];
 		peer_id.copy_from_slice(&payload[0..32]);
-//		let peer_id = mixnet::to_sphinx_id(&payload[0..32]).ok()?;
+		//		let peer_id = mixnet::to_sphinx_id(&payload[0..32]).ok()?;
 		let mut pk = [0u8; 32];
 		pk.copy_from_slice(&payload[32..64]);
 		let mut signature = [0u8; 64];
@@ -184,7 +184,7 @@ impl mixnet::Topology for TopologyGraph {
 			let signature = keypair.0.sign(&message[..], &keypair.1);
 			result.extend_from_slice(&signature.to_bytes()[..]);
 		} else {
-			return None;
+			return None
 		}
 		Some(result)
 	}

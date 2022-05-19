@@ -20,6 +20,7 @@
 
 //! Mixnet configuration.
 
+//TODO type alias over x255 usage
 use libp2p_core::identity::ed25519::Keypair;
 
 use crate::{public_from_ed25519, secret_from_ed25519, MixPeerId, MixPublicKey, MixSecretKey};
@@ -64,7 +65,7 @@ impl Config {
 	pub fn new_with_ed25519_keypair(kp: &Keypair, id: MixPeerId) -> Self {
 		Self {
 			secret_key: secret_from_ed25519(&kp.secret()),
-			public_key: public_from_ed25519(&kp.public()),
+			public_key: public_from_ed25519(kp.public().encode()),
 			local_id: id,
 			target_bits_per_second: 128 * 1024,
 			timeout_ms: 5000,
@@ -83,6 +84,14 @@ impl Config {
 		rand::thread_rng().fill_bytes(&mut secret);
 		let secret_key: x25519_dalek::StaticSecret = secret.into();
 		let public_key = x25519_dalek::PublicKey::from(&secret_key);
+		Self::new_with_keys(id, public_key, secret_key)
+	}
+
+	pub fn new_with_keys(
+		id: MixPeerId,
+		public_key: x25519_dalek::PublicKey,
+		secret_key: x25519_dalek::StaticSecret,
+	) -> Self {
 		Self {
 			secret_key,
 			public_key,
@@ -97,5 +106,4 @@ impl Config {
 			persist_surb_query: true,
 		}
 	}
-
 }
