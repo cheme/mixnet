@@ -255,6 +255,25 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		}
 	}
 
+	pub fn restart(
+		&mut self,
+		new_id: Option<crate::MixPeerId>,
+		new_keys: Option<(MixPublicKey, crate::MixSecretKey)>,
+	) {
+		new_id.map(|id| self.local_id = id);
+		if let Some((pub_key, priv_key)) = new_keys {
+			self.public = pub_key;
+			self.secret = priv_key;
+		}
+		// disconnect all (need a new handshake).
+		for (mix_id, connection) in std::mem::take(&mut self.connected_peers).into_iter() {
+			if let Some(mix_id) = connection.mixnet_id.as_ref() {
+				self.handshaken_peers.remove(mix_id);
+				self.topology.disconnect(mix_id);
+			}
+		}
+	}
+
 	pub fn insert_connection(
 		&mut self,
 		peer: NetworkPeerId,

@@ -80,6 +80,14 @@ impl<T: Topology> MixnetWorker<T> {
 		MixnetWorker { mixnet, worker_in, worker_out }
 	}
 
+	pub fn restart(
+		&mut self,
+		new_id: Option<crate::MixPeerId>,
+		new_keys: Option<(MixPublicKey, crate::MixSecretKey)>,
+	) {
+		self.mixnet.restart(new_id, new_keys);
+	}
+
 	pub fn local_id(&self) -> &crate::MixPeerId {
 		self.mixnet.local_id()
 	}

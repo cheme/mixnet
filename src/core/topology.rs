@@ -62,7 +62,6 @@ pub trait Topology: Sized + Send + 'static {
 
 	fn is_first_node(&self, _id: &MixPeerId) -> bool;
 
-
 	/// If external is allowed, it returns a ratio of
 	/// routing node bandwidth to use.
 	fn allowed_external(&self, _id: &MixPeerId) -> Option<(usize, usize)> {

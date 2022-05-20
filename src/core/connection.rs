@@ -195,9 +195,7 @@ impl<C: Connection> ManagedConnection<C> {
 					Poll::Ready(Err(()))
 				}
 			},
-			Poll::Ready(Ok(None)) => {
-				self.try_recv_handshake(cx, topology)
-			},
+			Poll::Ready(Ok(None)) => self.try_recv_handshake(cx, topology),
 			Poll::Ready(Err(())) => {
 				log::trace!(target: "mixnet", "Error receiving handshake from peer, closing: {:?}", self.peer_id);
 				Poll::Ready(Err(()))
@@ -237,9 +235,7 @@ impl<C: Connection> ManagedConnection<C> {
 				}
 				Poll::Ready(Ok(packet))
 			},
-			Poll::Ready(Ok(None)) => {
-				self.try_recv_packet(cx, current_window)
-			},
+			Poll::Ready(Ok(None)) => self.try_recv_packet(cx, current_window),
 			Poll::Ready(Err(())) => {
 				log::trace!(target: "mixnet", "Error receiving from peer, closing: {:?}", self.peer_id);
 				Poll::Ready(Err(()))
@@ -262,7 +258,10 @@ impl<C: Connection> ManagedConnection<C> {
 				log::error!(target: "mixnet", "Dropping packet, queue full: {:?}", self.peer_id);
 				return Err(crate::Error::QueueFull)
 			}
-			if !external && !topology.routing_to(local_id, peer_id) && topology.allowed_external(peer_id).is_none() {
+			if !external &&
+				!topology.routing_to(local_id, peer_id) &&
+				topology.allowed_external(peer_id).is_none()
+			{
 				log::error!(target: "mixnet", "NP routing to: {:?}", local_id); // TODO rem
 				return Err(crate::Error::NoPath(Some(peer_id.clone())))
 			}
