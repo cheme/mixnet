@@ -136,6 +136,16 @@ impl mixnet::Topology for TopologyGraph {
 		}
 	}
 
+	fn allowed_external(&self, id: &MixPeerId) -> Option<(usize, usize)> {
+		if self.external.as_ref() == Some(id) {
+			return Some((1, 1))
+		}
+		if self.external.is_some() {
+			return None
+		}
+		Some((1, 1))
+	}
+
 	fn allow_external(&mut self, id: &MixPeerId) -> Option<(usize, usize)> {
 		if self.external.as_ref() == Some(id) {
 			return Some((1, 1))
@@ -251,6 +261,7 @@ fn test_messages(
 			num_hops: 3,
 			average_message_delay_ms: 50,
 			limit_per_window: None,
+			limit_per_window_routing: None,
 			persist_surb_query: false,
 			replay_ttl_ms: 100_000,
 			surb_ttl_ms: 100_000,

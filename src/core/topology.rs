@@ -62,10 +62,19 @@ pub trait Topology: Sized + Send + 'static {
 
 	fn is_first_node(&self, _id: &MixPeerId) -> bool;
 
+
 	/// If external is allowed, it returns a ratio of
 	/// routing node bandwidth to use.
+	fn allowed_external(&self, _id: &MixPeerId) -> Option<(usize, usize)> {
+		None
+	}
+
+	/// If external is allowed, it returns a ratio of
+	/// routing node bandwidth to use.
+	/// This method also register the external peer.
 	/// TODO have an explicit reserve external and an allow + routing_to
 	/// would need to take external pool in consideration.
+	/// TODO remove : topology handshake should handle that
 	fn allow_external(&mut self, _id: &MixPeerId) -> Option<(usize, usize)> {
 		None
 	}
@@ -260,6 +269,10 @@ impl Topology for NoTopology {
 			.filter(|(k, _v)| k != &from)
 			.choose(&mut rng)
 			.map(|(k, v)| (k.clone(), v.clone()))
+	}
+
+	fn allowed_external(&self, _id: &MixPeerId) -> Option<(usize, usize)> {
+		Some((1, 1))
 	}
 
 	fn allow_external(&mut self, _id: &MixPeerId) -> Option<(usize, usize)> {

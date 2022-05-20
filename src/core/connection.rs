@@ -48,7 +48,7 @@ pub trait Connection {
 }
 
 pub(crate) enum ConnectionEvent {
-	Established(MixPublicKey),
+	Established(MixPeerId, MixPublicKey),
 	Received(Packet),
 	Broken,
 	None,
@@ -175,7 +175,7 @@ impl<C: Connection> ManagedConnection<C> {
 		&mut self,
 		cx: &mut Context,
 		topology: &mut impl Topology,
-	) -> Poll<Result<MixPublicKey, ()>> {
+	) -> Poll<Result<(MixPeerId, MixPublicKey), ()>> {
 		if self.handshake_received() {
 			// ignore
 			return Poll::Pending
@@ -189,13 +189,15 @@ impl<C: Connection> ManagedConnection<C> {
 				{
 					self.mixnet_id = Some(peer_id);
 					self.public_key = Some(pk.clone()); // TODO is public key needed: just bool?
-					Poll::Ready(Ok(pk))
+					Poll::Ready(Ok((peer_id, pk)))
 				} else {
 					log::trace!(target: "mixnet", "Invalid handshake from peer, closing: {:?}", self.peer_id);
 					Poll::Ready(Err(()))
 				}
 			},
-			Poll::Ready(Ok(None)) => self.try_recv_handshake(cx, topology),
+			Poll::Ready(Ok(None)) => {
+				self.try_recv_handshake(cx, topology)
+			},
 			Poll::Ready(Err(())) => {
 				log::trace!(target: "mixnet", "Error receiving handshake from peer, closing: {:?}", self.peer_id);
 				Poll::Ready(Err(()))
@@ -222,7 +224,7 @@ impl<C: Connection> ManagedConnection<C> {
 				if self.current_window == current_window {
 					self.window_count += 1;
 					if self.limit_msg.as_ref().map(|l| &self.window_count > l).unwrap_or(false) {
-						log::warn!(target: "mixnet", "Receiving too many messages from {:?}, disconecting.", self.peer_id);
+						log::warn!(target: "mixnet", "Receiving too many messages {:?} / {:?} from {:?}, disconecting.", self.window_count, self.limit_msg.as_ref().unwrap(), self.peer_id);
 						// TODO this is racy eg if you are in the topology but topology is not
 						// yet synch, you can get banned: need to just stop receiving for a
 						// while, and sender should delay its sending for the same amount of
@@ -235,7 +237,9 @@ impl<C: Connection> ManagedConnection<C> {
 				}
 				Poll::Ready(Ok(packet))
 			},
-			Poll::Ready(Ok(None)) => self.try_recv_packet(cx, current_window),
+			Poll::Ready(Ok(None)) => {
+				self.try_recv_packet(cx, current_window)
+			},
 			Poll::Ready(Err(())) => {
 				log::trace!(target: "mixnet", "Error receiving from peer, closing: {:?}", self.peer_id);
 				Poll::Ready(Err(()))
@@ -258,7 +262,7 @@ impl<C: Connection> ManagedConnection<C> {
 				log::error!(target: "mixnet", "Dropping packet, queue full: {:?}", self.peer_id);
 				return Err(crate::Error::QueueFull)
 			}
-			if !external && !topology.routing_to(local_id, peer_id) {
+			if !external && !topology.routing_to(local_id, peer_id) && topology.allowed_external(peer_id).is_none() {
 				log::error!(target: "mixnet", "NP routing to: {:?}", local_id); // TODO rem
 				return Err(crate::Error::NoPath(Some(peer_id.clone())))
 			}
@@ -290,7 +294,7 @@ impl<C: Connection> ManagedConnection<C> {
 					self.sent_in_window = current_packet_in_window;
 					self.recv_in_window = current_packet_in_window;
 					self.established.take().map(|e| e.send(()));
-					result = Poll::Ready(ConnectionEvent::Established(key));
+					result = Poll::Ready(ConnectionEvent::Established(key.0, key.1));
 				},
 				Poll::Ready(Err(())) => return Poll::Ready(ConnectionEvent::Broken),
 				Poll::Pending => (),
@@ -349,11 +353,11 @@ impl<C: Connection> ManagedConnection<C> {
 					Poll::Pending => break,
 				}
 			}
-			let current = if topology.routing_to(&peer_id, local_id) {
-				current_packet_in_window
+			let (current, external) = if topology.routing_to(&peer_id, local_id) {
+				(current_packet_in_window, false)
 			} else {
 				let (n, d) = topology.allow_external(&peer_id).unwrap_or((0, 1));
-				(current_packet_in_window * n) / d
+				((current_packet_in_window * n) / d, true)
 			};
 			if self.recv_in_window < current {
 				match self.try_recv_packet(cx, current_window) {
@@ -371,7 +375,7 @@ impl<C: Connection> ManagedConnection<C> {
 					let skipped = current_window - self.current_window;
 					log::warn!(target: "mixnet", "Window skipped {:?} ignoring report", skipped);
 				// TODO can have a last tick in window that require being within margin.
-				} else {
+				} else if !external {
 					let packet_per_window_less_margin =
 						packet_per_window * (100 - WINDOW_MARGIN_PERCENT) / 100;
 					if self.sent_in_window < packet_per_window_less_margin {

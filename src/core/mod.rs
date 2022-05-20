@@ -207,6 +207,8 @@ pub struct Mixnet<T, C> {
 	// of send, just add some leniency so in case late try to query more.
 	default_limit_msg: Option<u32>,
 
+	default_limit_msg_routing: Option<u32>,
+
 	packet_per_window: usize,
 	current_window_start: Instant,
 	current_window: Wrapping<usize>,
@@ -243,6 +245,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			average_hop_delay: Duration::from_millis(config.average_message_delay_ms as u64),
 			average_traffic_delay,
 			default_limit_msg: config.limit_per_window,
+			default_limit_msg_routing: config.limit_per_window_routing,
 			current_window_start: now,
 			last_now: now,
 			current_window: Wrapping(0),
@@ -623,7 +626,11 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 				self.last_now,
 				&mut self.topology,
 			) {
-				Poll::Ready(ConnectionEvent::Established(key)) => {
+				Poll::Ready(ConnectionEvent::Established(id, key)) => {
+					if self.topology.is_routing(&id) {
+						connection.change_limit_msg(self.default_limit_msg_routing.clone());
+					}
+
 					all_pending = false;
 					if let Some(sphinx_id) = connection.mixnet_id.clone() {
 						// TODO sphinx id in message looks more proper.

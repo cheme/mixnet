@@ -105,6 +105,11 @@ impl ConnectionT for Connection {
 				.poll_read(cx, &mut self.inbound_waiting.0[self.inbound_waiting.1..])
 		}) {
 			Some(Poll::Ready(Ok(nb))) => {
+				// Some implementation return 0 on disconnection.
+				if nb == 0 && size != 0 {
+					log::error!(target: "mixnet", "Transport reading 0 byte, disconnecting.");
+					return Poll::Ready(Err(()));
+				}
 				self.inbound_waiting.1 += nb;
 				let message = if self.inbound_waiting.1 == size {
 					self.inbound_waiting.1 = 0;
