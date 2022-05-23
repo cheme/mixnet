@@ -162,7 +162,7 @@ impl mixnet::Topology for TopologyGraph {
 		pk.copy_from_slice(&payload[32..64]);
 		let mut signature = [0u8; 64];
 		signature.copy_from_slice(&payload[64..]);
-		let signature = ed25519_dalek::Signature::new(signature);
+		let signature = ed25519_dalek::Signature::from_bytes(&signature[..]).unwrap();
 		let pub_key = ed25519_dalek::PublicKey::from_bytes(&peer_id[..]).unwrap();
 		let mut message = self.local_network_id.unwrap().to_bytes().to_vec();
 		message.extend_from_slice(&pk[..]);
@@ -220,8 +220,7 @@ fn test_messages(
 	let mut secrets = Vec::new();
 	let mut transports = Vec::new();
 	for _ in 0..num_peers + extra_external {
-		let (peer_id, peer_key, trans) = mk_transport();
-		use rand::rngs::OsRng;
+		let (peer_id, _peer_key, trans) = mk_transport();
 		let mut secret = [0u8; 32];
 		rand::thread_rng().fill_bytes(&mut secret);
 		let peer_secret_key: x25519_dalek::StaticSecret = secret.into();
@@ -240,10 +239,6 @@ fn test_messages(
 
 	let topology = TopologyGraph::new_star(&nodes[..num_peers]);
 
-	let mut to_behavior_external_1 = None;
-	let mut to_behavior_external_2 = None;
-	let mut to_worker_external_1 = None;
-	let mut to_worker_external_2 = None;
 	let mut swarms = Vec::new();
 	let mut count_connection = Vec::new();
 	let mut workers = Vec::new();
@@ -265,31 +260,19 @@ fn test_messages(
 		};
 
 		let (to_worker_sink, to_worker_stream) = mpsc::channel(1000);
-		if i == num_peers {
-			to_worker_external_1 = Some(to_worker_sink.clone());
-		}
-		if i == num_peers + 1 {
-			to_worker_external_2 = Some(to_worker_sink.clone());
-		}
 
 		let (from_worker_sink, from_worker_stream) = mpsc::channel(1000);
-		if i == num_peers {
-			to_behavior_external_1 = Some(from_worker_sink.clone());
-		}
-		if i == num_peers + 1 {
-			to_behavior_external_2 = Some(from_worker_sink.clone());
-		}
 
 		let mixnet =
 			mixnet::MixnetBehaviour::new(Box::new(to_worker_sink), Box::new(from_worker_stream));
 		let mut topo = topology.clone();
-		let mut counter = Arc::new(AtomicUsize::new(0));
+		let counter = Arc::new(AtomicUsize::new(0));
 		topo.nb_connected = counter.clone();
 		topo.local_id = Some(id.clone());
 		topo.local_network_id = Some(network_ids[i].0.clone());
 		topo.mix_secret_key = Some(network_ids[i].1.clone());
 		count_connection.push(counter);
-		let mut worker = Arc::new(Mutex::new(mixnet::MixnetWorker::new(
+		let worker = Arc::new(Mutex::new(mixnet::MixnetWorker::new(
 			cfg,
 			topo,
 			(Box::new(from_worker_sink), Box::new(to_worker_stream)),
@@ -395,9 +378,6 @@ fn test_messages(
 	}
 
 	let mut sender = if from_external {
-		let index_dest = swarms.iter().position(|(p, _)| *p == 0).unwrap();
-		let index_external_1 = swarms.iter().position(|(p, _)| *p == num_peers).unwrap();
-		let index_external_2 = swarms.iter().position(|(p, _)| *p == num_peers + 1).unwrap();
 		assert_eq!(count_connection[num_peers].load(Ordering::Relaxed), 1);
 		assert_eq!(count_connection[num_peers + 1].load(Ordering::Relaxed), 0);
 		// ext 1 can route through peer 0 (only peer acceptiong)
