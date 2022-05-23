@@ -194,12 +194,7 @@ pub struct Mixnet<T, C> {
 	// and return it with surb reply.
 	persist_surb_query: bool,
 
-	// TODO replace by a rec limit over a window
-	// with a given number of received message = to the number
-	// of send, just add some leniency so in case late try to query more.
-	default_limit_msg: Option<u32>,
-
-	default_limit_msg_routing: Option<u32>,
+	default_limit_msg: Option<usize>,
 
 	packet_per_window: usize,
 	current_window_start: Instant,
@@ -237,7 +232,6 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			average_hop_delay: Duration::from_millis(config.average_message_delay_ms as u64),
 			average_traffic_delay,
 			default_limit_msg: config.limit_per_window,
-			default_limit_msg_routing: config.limit_per_window_routing,
 			current_window_start: now,
 			last_now: now,
 			current_window: Wrapping(0),
@@ -308,7 +302,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			.get(&recipient)
 			.and_then(|r| self.connected_peers.get_mut(r))
 		{
-			let deadline = Some(self.last_now + delay); // TODO could get now from param
+			let deadline = Some(self.last_now + delay);
 			connection.queue_packet(
 				QueuedPacket { deadline, data },
 				self.packet_per_window,
@@ -318,13 +312,6 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			)?;
 		} else {
 			return Err(Error::Unreachable(data))
-			// TODO maybe if in topology, try dial and add to local size restricted heap
-			/*		if self.packet_queue.len() >= MAX_QUEUED_PACKETS {
-						return Err(Error::QueueFull)
-					}
-					let deadline = Some(Instant::now() + delay);
-					self.packet_queue.push(QueuedPacket { deadline, data, recipient });
-			*/
 		}
 		Ok(())
 	}
@@ -632,8 +619,8 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 				&mut self.topology,
 			) {
 				Poll::Ready(ConnectionEvent::Established(id, key)) => {
-					if self.topology.is_routing(&id) {
-						connection.change_limit_msg(self.default_limit_msg_routing.clone());
+					if self.topology.routing_to(&id, &self.local_id) {
+						connection.change_limit_msg(None);
 					}
 
 					all_pending = false;
@@ -714,12 +701,6 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			},
 		}
 		true
-	}
-
-	pub fn accept_peer(&mut self, peer_id: &MixPeerId) -> bool {
-		self.topology.routing_to(&self.local_id, peer_id) ||
-			self.topology.routing_to(peer_id, &self.local_id) ||
-			self.topology.allow_external(peer_id).is_some()
 	}
 }
 

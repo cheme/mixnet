@@ -179,6 +179,9 @@ impl mixnet::Topology for TopologyGraph {
 		use ed25519_dalek::Verifier;
 		if pub_key.verify(&message[..], &signature).is_ok() {
 			let pk = MixPublicKey::from(pk);
+			if !self.accept_peer(self.local_id.as_ref().unwrap(), &peer_id) {
+				return None
+			}
 			Some((peer_id, pk))
 		} else {
 			None

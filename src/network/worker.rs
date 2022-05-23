@@ -76,7 +76,7 @@ impl<T: Topology> MixnetWorker<T> {
 		self.mixnet.public_key()
 	}
 
-	pub fn change_peer_limit_window(&mut self, peer: &crate::MixPeerId, new_limit: Option<u32>) {
+	pub fn change_peer_limit_window(&mut self, peer: &crate::MixPeerId, new_limit: Option<usize>) {
 		if let Some(con) = self.mixnet.managed_connection_mut(peer) {
 			con.change_limit_msg(new_limit);
 		}
@@ -112,22 +112,6 @@ impl<T: Topology> MixnetWorker<T> {
 						let con = Connection::new(close_handler, inbound, outbound);
 						self.mixnet.insert_connection(peer, con);
 					}
-					/* TODO accept peer replaced or move by handshake result
-					 * peer
-					if !self.mixnet.accept_peer(&peer) {
-						log::trace!("Rejected peer {:?}", peer);
-						if let Err(e) =
-							self.worker_out.start_send_unpin(MixnetEvent::Disconnected(peer))
-						{
-							log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
-						}
-					} else if let Some(_con) = self.mixnet.connected_mut(&peer) {
-						log::error!("Trying to replace an existing connection for {:?}", peer);
-					} else {
-						let con = Connection::new(handler, inbound, outbound);
-						self.mixnet.insert_connection(peer, con, established);
-					}
-					*/
 					log::trace!(target: "mixnet", "added peer out: {:?}", peer);
 				},
 				WorkerCommand::AddPeerInbound(peer, inbound) => {

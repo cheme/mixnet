@@ -223,6 +223,13 @@ pub trait Topology: Sized + Send + 'static {
 	///
 	/// Return None if peer is filtered by network id.
 	fn handshake(&mut self, with: &NetworkPeerId, public_key: &MixPublicKey) -> Option<Vec<u8>>;
+
+	/// Utils that should be call when using `check_handshake`.
+	fn accept_peer(&self, local_id: &MixPeerId, peer_id: &MixPeerId) -> bool {
+		self.routing_to(&local_id, peer_id) ||
+			self.routing_to(peer_id, &local_id) ||
+			self.allowed_external(peer_id).is_some()
+	}
 }
 
 fn gen_paths<T: Topology>(

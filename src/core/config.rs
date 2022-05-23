@@ -49,7 +49,7 @@ pub struct Config {
 	/// limit for routing peers.
 	/// `None` is unlimited.
 	/// Window is `WINDOW_BACKPRESSURE` duration.
-	pub limit_per_window: Option<u32>,
+	pub limit_per_window: Option<usize>,
 	/// Same as `limit_per_window` but for connection that are routing.
 	pub limit_per_window_routing: Option<u32>,
 	/// Retention time until we drop surb query.
@@ -83,7 +83,7 @@ impl Config {
 			timeout_ms: 5000,
 			num_hops: 3,
 			average_message_delay_ms: 500,
-			limit_per_window: Some((WINDOW_BACKPRESSURE.as_millis() as u32 / 250) * 2),
+			limit_per_window: Some((WINDOW_BACKPRESSURE.as_millis() as usize / 250) * 2),
 			limit_per_window_routing: None,
 			surb_ttl_ms: 100_000,
 			replay_ttl_ms: 100_000,
