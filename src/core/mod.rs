@@ -266,7 +266,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 			self.secret = priv_key;
 		}
 		// disconnect all (need a new handshake).
-		for (mix_id, connection) in std::mem::take(&mut self.connected_peers).into_iter() {
+		for (_mix_id, connection) in std::mem::take(&mut self.connected_peers).into_iter() {
 			if let Some(mix_id) = connection.mixnet_id.as_ref() {
 				self.handshaken_peers.remove(mix_id);
 				self.topology.disconnect(mix_id);

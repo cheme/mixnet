@@ -36,14 +36,15 @@ use std::{
 pub const READ_TIMEOUT: Duration = Duration::from_secs(120); // TODO a bit less, but currently not that many cover sent
 
 pub trait Connection {
-	/// Start send a message. This trait expect single message queue
+	/// Start sending a message. This trait expects to queue a single message
 	/// and return the message back if another message is currently being send.
-	fn try_send(&mut self, message: Vec<u8>) -> Option<Vec<u8>>;
-	/// Send and flush, return when all message is written and flushed.
-	/// Return false if ignored.
+	fn try_queue_send(&mut self, message: Vec<u8>) -> Option<Vec<u8>>;
+	/// Send and flush, return true when queued message is written and flushed.
+	/// Return false if ignored (no queued message).
 	/// Return Error if connection broke.
 	fn send_flushed(&mut self, cx: &mut Context) -> Poll<Result<bool, ()>>;
 	/// Try receive a packet of a given size.
+	/// Maximum supported size is `PACKET_SIZE`, return error otherwise.
 	fn try_recv(&mut self, cx: &mut Context, size: usize) -> Poll<Result<Option<Vec<u8>>, ()>>;
 }
 
@@ -128,7 +129,7 @@ impl<C: Connection> ManagedConnection<C> {
 				log::trace!(target: "mixnet", "Cannot create handshake with {}", self.peer_id);
 				return Poll::Ready(Err(()))
 			};
-			if self.connection.try_send(handshake).is_none() {
+			if self.connection.try_queue_send(handshake).is_none() {
 				self.handshake_sent = true;
 			} else {
 				unreachable!("Handshak is first connection send");
@@ -161,14 +162,14 @@ impl<C: Connection> ManagedConnection<C> {
 	}
 
 	// return packet if already sending one.
-	pub fn try_send_packet(&mut self, packet: Vec<u8>) -> Option<Vec<u8>> {
+	pub fn try_queue_send_packet(&mut self, packet: Vec<u8>) -> Option<Vec<u8>> {
 		if !self.is_ready() {
 			log::error!(target: "mixnet", "Error sending to peer {:?}", self.peer_id);
 			// Drop: TODO only drop after some
 			return None
 		}
 		log::trace!(target: "mixnet", "sp {:?}", self.peer_id);
-		self.connection.try_send(packet)
+		self.connection.try_queue_send(packet)
 	}
 
 	fn try_recv_handshake(
@@ -316,7 +317,7 @@ impl<C: Connection> ManagedConnection<C> {
 					},
 					Poll::Ready(Ok(false)) => {
 						if let Some(packet) = self.next_packet.take() {
-							if let Some(packet) = self.try_send_packet(packet) {
+							if let Some(packet) = self.try_queue_send_packet(packet) {
 								log::error!(target: "mixnet", "try send fail when should be ready.");
 								self.next_packet = Some(packet);
 
