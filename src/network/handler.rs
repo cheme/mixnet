@@ -39,7 +39,6 @@ use void::Void;
 /// The configuration for the protocol.
 #[derive(Clone, Debug)]
 pub struct Config {
-	/// Target traffic rate in bits per second.
 	connection_timeout: Duration,
 }
 
@@ -52,6 +51,7 @@ impl Config {
 /// An outbound failure.
 #[derive(Debug)]
 pub enum Failure {
+	/// Protocol negotiation timeout.
 	Timeout,
 	/// The peer does not support the protocol.
 	Unsupported,
@@ -82,29 +82,26 @@ impl Error for Failure {
 }
 
 /// Protocol handler that handles dispatching messages.
-///
-/// If the remote doesn't send anything within a time frame, produces an error that closes the
-/// connection.
 pub struct Handler {
 	/// Configuration options.
-	config: Config, // TODO just connection timeout
-	/// Outbound failures that are pending to be processed by `poll()`.
+	config: Config,
+	/// Failures that are pending to be processed by `poll()`.
 	pending_errors: VecDeque<Failure>,
-	/// The outbound state.
+	/// Is an outbound query needed.
 	do_outbound_query: bool,
-
-	/// Inbound stream.
-	inbound: Option<NegotiatedSubstream>,
-	/// Outbound sink.
-	outbound: Option<NegotiatedSubstream>,
-
-	peer_id: Option<PeerId>,
 	/// Tracks the state of our handler.
 	state: State,
 	/// Send connection to worker.
 	mixnet_worker_sink: WorkerSink,
+	/// Receive connection close event when the connection sent to mixnet is dropped.
 	connection_closed: Option<futures::channel::oneshot::Receiver<()>>,
-	established: Option<futures::channel::oneshot::Sender<()>>,
+
+	/// Inbound stream kept until outbound is send.
+	inbound: Option<NegotiatedSubstream>,
+	/// Outbound sink kept until we know peer_id.
+	outbound: Option<NegotiatedSubstream>,
+	/// Peer id kept until we got outbound.
+	peer_id: Option<PeerId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,16 +134,7 @@ impl Handler {
 			state: State::ActiveNotSent,
 			mixnet_worker_sink,
 			connection_closed: None,
-			established: None,
 		}
-	}
-
-	pub(crate) fn set_established(&mut self, established: futures::channel::oneshot::Sender<()>) {
-		self.established = Some(established);
-	}
-
-	pub(crate) fn set_peer_id(&mut self, peer_id: PeerId) {
-		self.peer_id = Some(peer_id);
 	}
 }
 
@@ -165,7 +153,6 @@ impl Handler {
 							inbound,
 							outbound,
 							sender,
-							self.established.take(),
 						)) {
 						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
 					}

@@ -36,16 +36,16 @@ pub struct Connection {
 	outbound: Pin<Box<NegotiatedSubstream>>,
 	outbound_buffer: Option<(Vec<u8>, usize)>,
 	outbound_flushing: bool,
-	inbound_buffer: (Vec<u8>, usize),
+	inbound_buffer: (Box<[u8; PACKET_SIZE]>, usize),
 	// put in pending state while waiting for inbound stream.
 	waker: Option<std::task::Waker>,
 	// Inform connection handler when connection is dropped.
-	oneshot_handler: Option<OneShotSender<()>>,
+	close_handler: Option<OneShotSender<()>>,
 }
 
 impl Drop for Connection {
 	fn drop(&mut self) {
-		self.oneshot_handler.take().map(|s| s.send(()));
+		self.close_handler.take().map(|s| s.send(()));
 	}
 }
 
@@ -97,7 +97,7 @@ impl ConnectionT for Connection {
 
 	fn try_recv(&mut self, cx: &mut Context, size: usize) -> Poll<Result<Option<Vec<u8>>, ()>> {
 		if size > PACKET_SIZE {
-			return Poll::Ready(Err(()));
+			return Poll::Ready(Err(()))
 		}
 		match self.inbound.as_mut().map(|inbound| {
 			inbound
@@ -111,16 +111,14 @@ impl ConnectionT for Connection {
 					return Poll::Ready(Err(()))
 				}
 				self.inbound_buffer.1 += nb;
-				let message = if self.inbound_buffer.1 == size {
+				let message = (self.inbound_buffer.1 == size).then(|| {
 					self.inbound_buffer.1 = 0;
 					if size == self.inbound_buffer.0.len() {
-						Some(self.inbound_buffer.0.clone())
+						self.inbound_buffer.0.to_vec()
 					} else {
-						Some(self.inbound_buffer.0[..size].to_vec())
+						self.inbound_buffer.0[..size].to_vec()
 					}
-				} else {
-					None
-				};
+				});
 				Poll::Ready(Ok(message))
 			},
 			Some(Poll::Ready(Err(e))) => {
@@ -140,7 +138,7 @@ impl ConnectionT for Connection {
 
 impl Connection {
 	pub fn new(
-		oneshot_handler: OneShotSender<()>,
+		close_handler: OneShotSender<()>,
 		inbound: Option<NegotiatedSubstream>,
 		outbound: NegotiatedSubstream,
 	) -> Self {
@@ -148,9 +146,9 @@ impl Connection {
 			inbound: inbound.map(|i| Box::pin(i)),
 			outbound: Box::pin(outbound),
 			outbound_buffer: None,
-			inbound_buffer: (vec![0; PACKET_SIZE], 0),
+			inbound_buffer: (Box::new([0u8; PACKET_SIZE]), 0),
 			outbound_flushing: false,
-			oneshot_handler: Some(oneshot_handler),
+			close_handler: Some(close_handler),
 			waker: None,
 		}
 	}

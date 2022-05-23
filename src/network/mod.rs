@@ -37,7 +37,6 @@ use futures::{channel::mpsc::SendError, Sink, SinkExt, Stream, StreamExt};
 use handler::Handler;
 use libp2p_core::{connection::ConnectionId, ConnectedPoint, Multiaddr, PeerId};
 use libp2p_swarm::{
-	dial_opts::{DialOpts, PeerCondition},
 	CloseConnection, IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction,
 	NotifyHandler, PollParameters,
 };
@@ -244,24 +243,6 @@ impl NetworkBehaviour for MixnetBehaviour {
 					Poll::Ready(NetworkBehaviourAction::GenerateEvent(NetworkEvent::Message(
 						DecodedMessage { peer, message, kind },
 					))),
-				WorkerOut::Dial(peer, addresses, reply) =>
-					if !self.connected.contains_key(&peer) {
-						let mut handler = self.new_handler();
-						handler.set_peer_id(peer.clone());
-						if let Some(reply) = reply {
-							handler.set_established(reply);
-						}
-						Poll::Ready(NetworkBehaviourAction::Dial {
-							opts: DialOpts::peer_id(peer)
-								.condition(PeerCondition::Disconnected)
-								.addresses(addresses)
-								.extend_addresses_through_behaviour()
-								.build(),
-							handler,
-						})
-					} else {
-						self.poll(cx, params)
-					},
 			},
 			Poll::Ready(None) =>
 				return Poll::Ready(NetworkBehaviourAction::GenerateEvent(NetworkEvent::CloseStream)),

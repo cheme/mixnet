@@ -30,13 +30,13 @@ mod topology;
 use self::{fragment::MessageCollection, sphinx::Unwrapped};
 pub use crate::core::sphinx::{SurbsPayload, SurbsPersistance};
 use crate::{
-	core::connection::{ConnectionEvent, ManagedConnection},
+	core::connection::{ConnectionEvent, ManagedConnection}, NetworkPeerId,
 	MessageType, MixPeerId, SendOptions, WorkerOut, WorkerSink2,
 };
 pub use config::Config;
 pub use connection::Connection;
 pub use error::Error;
-use futures::{channel::oneshot::Sender as OneShotSender, FutureExt, SinkExt};
+use futures::{FutureExt, SinkExt};
 use futures_timer::Delay;
 use libp2p_core::identity::ed25519;
 use rand::{CryptoRng, Rng};
@@ -51,7 +51,6 @@ use std::{
 };
 pub use topology::{NoTopology, Topology};
 
-type NetworkPeerId = libp2p_core::PeerId;
 /// Mixnet peer DH static public key.
 pub type MixPublicKey = sphinx::PublicKey;
 /// Mixnet peer DH static secret key.
@@ -278,14 +277,12 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		&mut self,
 		peer: NetworkPeerId,
 		connection: C,
-		established: Option<OneShotSender<()>>,
 	) {
 		let connection = ManagedConnection::new(
 			peer.clone(),
 			self.default_limit_msg.clone(),
 			connection,
 			self.current_window,
-			established,
 		);
 		self.connected_peers.insert(peer, connection);
 	}

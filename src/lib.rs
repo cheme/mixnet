@@ -36,11 +36,16 @@ pub use network::{
 /// Mixnet peer identity.
 pub type MixPeerId = [u8; 32];
 
+/// Mixnet network peer identity.
+type NetworkPeerId = libp2p_core::PeerId;
+
 /// Options for sending a message in the mixnet.
 pub struct SendOptions {
-	/// Number of hop for the message.
-	/// If undefined, mixnet defined number of hop will be used.
-	/// For its surb the same number will be use.
+	/// Number of hops for the message.
+	/// If undefined, mixnet configured number of hop will be used.
+	/// This number is automatically increased by one for node that are not
+	/// in topology and by two for node that are not in topology trying to
+	/// reach another node that is not in topology.
 	pub num_hop: Option<usize>,
 
 	/// Do we attach a surb with the message.
