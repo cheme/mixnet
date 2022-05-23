@@ -34,31 +34,18 @@ pub trait Topology: Sized + Send + 'static {
 
 	/// For a given peer return a list of peers it is supposed to be connected to.
 	/// Return `None` if peer is not routing.
-	/// TODO if removing random_path default implementation, this can be removed too.
-	/// These are live neighbors.
 	fn neighbors(&self, id: &MixPeerId) -> Option<Vec<(MixPeerId, MixPublicKey)>>;
 
+	/// Check if a peer is in topology.
 	fn is_routing(&self, id: &MixPeerId) -> bool {
 		self.neighbors(id).is_some()
 	}
 
-	/*	/// Allowed neighbors that are not live.
-		/// This method is used to try connection periodically.
-		fn try_connect_neighbors(&self, _id: &MixPeerId) -> Option<Vec<(MixPeerId, MixPublicKey)>> {
-			None
-		} -> can be done externally with dial on topo init or change
-	*/
 	/// Nodes that can be first hop.
 	fn first_hop_nodes(&self) -> Vec<(MixPeerId, MixPublicKey)>;
 
 	/// first hop nodes that may allow external node connection.
 	fn first_hop_nodes_external(&self, _from: &MixPeerId) -> Vec<(MixPeerId, MixPublicKey)>;
-
-	/// Exit nodes, attempt connection to dest node
-	fn last_hop_nodes_external(&self) -> Vec<(MixPeerId, MixPublicKey)> {
-		// TODO implement or consider removal
-		vec![]
-	}
 
 	fn is_first_node(&self, _id: &MixPeerId) -> bool;
 
@@ -127,23 +114,16 @@ pub trait Topology: Sized + Send + 'static {
 		let recipient = if self.is_routing(recipient_node.0) {
 			recipient_node.0.clone()
 		} else {
-			let lasts = self.last_hop_nodes_external();
-			if lasts.len() == 0 {
-				if let Some(query) = last_query_if_surb {
-					// reuse a node that was recently connected.
-					if let Some(rec) = query.get(0) {
-						add_end = Some(recipient_node);
-						rec.0.clone()
-					} else {
-						return Err(Error::NoPath(Some(recipient_node.0.clone())))
-					}
+			if let Some(query) = last_query_if_surb {
+				// reuse a node that was recently connected.
+				if let Some(rec) = query.get(0) {
+					add_end = Some(recipient_node);
+					rec.0.clone()
 				} else {
 					return Err(Error::NoPath(Some(recipient_node.0.clone())))
 				}
 			} else {
-				let n: usize = rng.gen_range(0..lasts.len());
-				add_end = Some(recipient_node);
-				lasts[n].0.clone()
+				return Err(Error::NoPath(Some(recipient_node.0.clone())))
 			}
 		};
 		// Generate all possible paths and select one at random

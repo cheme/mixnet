@@ -62,15 +62,12 @@ pub const PUBLIC_KEY_LEN: usize = 32;
 /// Size of a mixnet packent.
 pub const PACKET_SIZE: usize = sphinx::OVERHEAD_SIZE + fragment::FRAGMENT_PACKET_SIZE;
 
-// TODO should be in conf (having too big window with a big bandwidth
-// can stuck node, small window will make evident issue faster).
-// TODO adapt packet per window from this.
 pub const WINDOW_DELAY: Duration = Duration::from_secs(2);
 
-// TODO in config
 pub const WINDOW_MARGIN_PERCENT: usize = 10;
 
-/// Sphinx packet struct ensuring fix len of inner array.
+/// Sphinx packet struct, goal of this struct
+/// is only to ensure the packet size is right.
 #[derive(PartialEq, Eq, Debug)]
 pub struct Packet(Vec<u8>);
 
@@ -153,7 +150,7 @@ pub fn public_from_ed25519(ed25519_pk: [u8; 32]) -> MixPublicKey {
 #[derive(PartialEq, Eq)]
 /// A real traffic message that we need to forward.
 pub(crate) struct QueuedPacket {
-	deadline: Option<Instant>, // TODO could replace by sent in window and window index
+	deadline: Option<Instant>,
 	pub data: Packet,
 }
 
@@ -573,6 +570,8 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		if Poll::Ready(()) == self.next_message.poll_unpin(cx) {
 			let now = Instant::now();
 			self.last_now = now;
+			// if everything is pending, window delay will wake up context switch window,
+			// and log insufficient receive messages.
 			if let Poll::Ready(_) = self.window_delay.poll_unpin(cx) {
 				let duration = now - self.current_window_start;
 				let nb_spent = (duration.as_millis() / WINDOW_DELAY.as_millis()) as usize;
@@ -602,12 +601,9 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		let mut all_pending = true;
 		let mut disconnected = Vec::new();
 		let mut recv_packets = Vec::new();
-		// TODO loop on ready
-		// and import inside (requires to split connected from other mixnet
-		// fields: would remove need for connection event received.
 
+		// TODO shuffled iterator?
 		for (peer_id, connection) in self.connected_peers.iter_mut() {
-			// TODO futures unordered
 			match connection.poll(
 				cx,
 				&self.local_id,
@@ -622,10 +618,8 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 					if self.topology.routing_to(&id, &self.local_id) {
 						connection.change_limit_msg(None);
 					}
-
 					all_pending = false;
 					if let Some(sphinx_id) = connection.mixnet_id() {
-						// TODO sphinx id in message looks more proper.
 						self.handshaken_peers.insert(sphinx_id.clone(), connection.network_id());
 						self.topology.connected(sphinx_id.clone(), key);
 					}
@@ -655,8 +649,9 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 
 		for (peer, packet) in recv_packets {
 			if !self.import_packet(peer, packet, results) {
-				// TODO what kind of log: cannot really make anything of error
-				// since one can send use dummy packet.
+				// warning this only indicate a peer send wrong packet, but cannot presume
+				// who (can be external).
+				log::trace!(target: "mixnet", "Error importing packet, wrong format.");
 			}
 		}
 

@@ -146,20 +146,10 @@ impl mixnet::Topology for TopologyGraph {
 		Some((1, 1))
 	}
 
-	fn allow_external(&mut self, id: &MixPeerId) -> Option<(usize, usize)> {
-		if self.external.as_ref() == Some(id) {
-			return Some((1, 1))
-		}
-		if self.external.is_some() {
-			return None
-		}
-		self.external = Some(id.clone());
-		Some((1, 1))
-	}
-
 	fn handshake_size(&self) -> usize {
 		32 + 32 + 64
 	}
+
 	fn check_handshake(
 		&mut self,
 		payload: &[u8],
@@ -182,14 +172,18 @@ impl mixnet::Topology for TopologyGraph {
 			if !self.accept_peer(self.local_id.as_ref().unwrap(), &peer_id) {
 				return None
 			}
+			if !self.is_routing(&peer_id) {
+				debug_assert!(self.external.is_none());
+				self.external = Some(peer_id.clone());
+			}
 			Some((peer_id, pk))
 		} else {
 			None
 		}
 	}
+
 	fn handshake(&mut self, with: &PeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
 		let mut result = self.local_id.as_ref().unwrap().to_vec();
-		// TODO need to sign public key with local id
 		result.extend_from_slice(&public_key.as_bytes()[..]);
 		if let Some(keypair) = &self.mix_secret_key {
 			let mut message = with.to_bytes().to_vec();

@@ -354,7 +354,7 @@ impl<C: Connection> ManagedConnection<C> {
 			let (current, external) = if topology.routing_to(&peer_id, local_id) {
 				(current_packet_in_window, false)
 			} else {
-				let (n, d) = topology.allow_external(&peer_id).unwrap_or((0, 1));
+				let (n, d) = topology.allowed_external(&peer_id).unwrap_or((0, 1));
 				((current_packet_in_window * n) / d, true)
 			};
 			if self.recv_in_window < current {

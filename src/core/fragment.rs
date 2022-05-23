@@ -110,7 +110,6 @@ impl Fragment {
 		hash
 	}
 
-	// TODO just use packet buff?: likely -> yes for building.
 	pub fn from_message(fragment: Vec<u8>, kind: &MessageType) -> Result<Option<Self>, Error> {
 		let with_surb = kind.with_surb();
 		if !with_surb && fragment.len() != FRAGMENT_PACKET_SIZE {
