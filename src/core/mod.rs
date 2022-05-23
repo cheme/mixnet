@@ -123,13 +123,6 @@ pub fn to_sphinx_id(id: &NetworkPeerId) -> Result<MixPeerId, Error> {
 	}
 }
 
-fn to_libp2p_id(id: MixPeerId) -> Result<NetworkPeerId, Error> {
-	let encoded = libp2p_core::identity::ed25519::PublicKey::decode(&id)
-		.map_err(|_e| Error::InvalidSphinxId(id.clone()))?;
-	let key = libp2p_core::identity::PublicKey::Ed25519(encoded);
-	Ok(NetworkPeerId::from_public_key(&key))
-}
-
 fn exp_delay<R: Rng + CryptoRng + ?Sized>(rng: &mut R, target: Duration) -> Duration {
 	let exp = rand_distr::Exp::new(1.0 / target.as_nanos() as f64).unwrap();
 	Duration::from_nanos(exp.sample(rng).round() as u64)
@@ -266,7 +259,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		}
 		// disconnect all (need a new handshake).
 		for (_mix_id, connection) in std::mem::take(&mut self.connected_peers).into_iter() {
-			if let Some(mix_id) = connection.mixnet_id.as_ref() {
+			if let Some(mix_id) = connection.mixnet_id() {
 				self.handshaken_peers.remove(mix_id);
 				self.topology.disconnect(mix_id);
 			}
@@ -284,7 +277,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 	}
 
 	pub fn connected_mut(&mut self, peer: &NetworkPeerId) -> Option<&mut C> {
-		self.connected_peers.get_mut(peer).map(|c| &mut c.connection)
+		self.connected_peers.get_mut(peer).map(|c| c.connection_mut())
 	}
 
 	pub(crate) fn managed_connection_mut(
@@ -546,7 +539,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 
 	/// Should be called when a peer is disconnected.
 	pub fn remove_connected_peer(&mut self, id: &NetworkPeerId) {
-		if let Some(mix_id) = self.connected_peers.remove(id).and_then(|c| c.mixnet_id) {
+		if let Some(mix_id) = self.connected_peers.remove(id).and_then(|c| c.mixnet_id().cloned()) {
 			self.handshaken_peers.remove(&mix_id);
 			self.topology.disconnect(&mix_id);
 		}
@@ -644,13 +637,13 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 					}
 
 					all_pending = false;
-					if let Some(sphinx_id) = connection.mixnet_id.clone() {
+					if let Some(sphinx_id) = connection.mixnet_id() {
 						// TODO sphinx id in message looks more proper.
-						self.handshaken_peers.insert(sphinx_id.clone(), connection.peer_id.clone());
-						self.topology.connected(sphinx_id, key);
+						self.handshaken_peers.insert(sphinx_id.clone(), connection.network_id());
+						self.topology.connected(sphinx_id.clone(), key);
 					}
 					if let Err(e) = results.start_send_unpin(MixnetEvent::Connected(
-						connection.peer_id.clone(),
+						connection.network_id(),
 						key.clone(),
 					)) {
 						log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
@@ -665,7 +658,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 				},
 				Poll::Ready(ConnectionEvent::Received(packet)) => {
 					all_pending = false;
-					if let Some(sphinx_id) = connection.mixnet_id.clone() {
+					if let Some(sphinx_id) = connection.mixnet_id() {
 						recv_packets.push((sphinx_id.clone(), packet));
 					}
 				},

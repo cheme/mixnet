@@ -24,7 +24,7 @@
 use crate::{
 	core::{Config, MixEvent, MixPublicKey, Mixnet, Packet, SurbsPayload, Topology},
 	network::connection::Connection,
-	DecodedMessage, MessageType, MixnetEvent, SendOptions,
+	DecodedMessage, MixnetEvent, SendOptions,
 };
 use futures::{
 	channel::{mpsc::SendError, oneshot::Sender as OneShotSender},

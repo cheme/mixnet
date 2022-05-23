@@ -48,7 +48,11 @@ const FRAGMENT_EXPIRATION_MS: u64 = 10000;
 
 const COVER_TAG: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 
-// hash is using tag as iv to avoid collision.
+// `hash` is using tag as iv to avoid collision.
+// Avoiding collision is not needed in all case.
+// In the case we do not need to count the number
+// of time an identical message was received, it
+// would not be needed.
 fn hash(iv: &[u8], data: &[u8]) -> MessageHash {
 	let mut r = MessageHash::default();
 	r.copy_from_slice(blake2_rfc::blake2b::blake2b(32, iv, data).as_bytes());

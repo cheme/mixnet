@@ -31,7 +31,7 @@ pub use crate::network::worker::WorkerSink as WorkerSink2;
 use crate::{
 	core::{self, SurbsPayload},
 	network::worker::WorkerCommand,
-	MixPeerId, MixPublicKey, MixnetEvent, SendOptions,
+	MixPeerId, MixnetEvent, SendOptions,
 };
 use dyn_clone::DynClone;
 use futures::{channel::mpsc::SendError, Sink, SinkExt, Stream, StreamExt};
@@ -52,13 +52,11 @@ pub type SinkToWorker = Box<dyn ClonableSink>;
 pub type WorkerChannels = (WorkerSink2, worker::WorkerStream);
 
 pub trait ClonableSink: Sink<WorkerCommand, Error = SendError> + DynClone + Unpin + Send {}
-
 impl<T> ClonableSink for T where T: Sink<WorkerCommand, Error = SendError> + DynClone + Unpin + Send {}
 
 /// A [`NetworkBehaviour`] that implements the mixnet protocol.
 pub struct MixnetBehaviour {
 	mixnet_worker_sink: SinkToWorker,
-	// TODO this stream is simply redirecting workers to a sink: TODO use it directly in worker
 	mixnet_worker_stream: StreamFromWorker,
 	// avoid two connections from a single peer.
 	connected: HashMap<PeerId, ConnectionId>,
@@ -154,13 +152,13 @@ impl NetworkBehaviour for MixnetBehaviour {
 	}
 
 	fn addresses_of_peer(&mut self, _peer: &PeerId) -> Vec<Multiaddr> {
-		// TODO cache addresses for extend_addresses_through_behaviour
+		// This will only need to be cached if dialing at some point.
 		vec![]
 	}
 
 	fn poll(
 		&mut self,
-		cx: &mut Context<'_>,
+		cx: &mut Context,
 		params: &mut impl PollParameters,
 	) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>> {
 		if let Some((id, connection)) = self.notify_queue.pop_front() {
@@ -183,12 +181,7 @@ impl NetworkBehaviour for MixnetBehaviour {
 						self.poll(cx, params)
 					}
 				},
-				e @ MixnetEvent::CloseStream =>
-					Poll::Ready(NetworkBehaviourAction::GenerateEvent(e)),
-				e @ MixnetEvent::Connected(..) =>
-					Poll::Ready(NetworkBehaviourAction::GenerateEvent(e)),
-				e @ MixnetEvent::Message(..) =>
-					Poll::Ready(NetworkBehaviourAction::GenerateEvent(e)),
+				e => Poll::Ready(NetworkBehaviourAction::GenerateEvent(e)),
 			},
 			Poll::Ready(None) =>
 				return Poll::Ready(NetworkBehaviourAction::GenerateEvent(MixnetEvent::CloseStream)),
