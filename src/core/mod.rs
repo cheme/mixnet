@@ -30,8 +30,8 @@ mod topology;
 use self::{fragment::MessageCollection, sphinx::Unwrapped};
 pub use crate::core::sphinx::{SurbsPayload, SurbsPersistance};
 use crate::{
-	core::connection::{ConnectionEvent, ManagedConnection}, NetworkPeerId,
-	MessageType, MixPeerId, SendOptions, WorkerOut, WorkerSink2,
+	core::connection::{ConnectionEvent, ManagedConnection},
+	DecodedMessage, MessageType, MixPeerId, MixnetEvent, NetworkPeerId, SendOptions, WorkerSink2,
 };
 pub use config::Config;
 pub use connection::Connection;
@@ -273,11 +273,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		}
 	}
 
-	pub fn insert_connection(
-		&mut self,
-		peer: NetworkPeerId,
-		connection: C,
-	) {
+	pub fn insert_connection(&mut self, peer: NetworkPeerId, connection: C) {
 		let connection = ManagedConnection::new(
 			peer.clone(),
 			self.default_limit_msg.clone(),
@@ -653,7 +649,7 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 						self.handshaken_peers.insert(sphinx_id.clone(), connection.peer_id.clone());
 						self.topology.connected(sphinx_id, key);
 					}
-					if let Err(e) = results.start_send_unpin(WorkerOut::Connected(
+					if let Err(e) = results.start_send_unpin(MixnetEvent::Connected(
 						connection.peer_id.clone(),
 						key.clone(),
 					)) {
@@ -707,10 +703,12 @@ impl<T: Topology, C: Connection> Mixnet<T, C> {
 		results: &mut WorkerSink2,
 	) -> bool {
 		match self.import_message(peer, packet) {
-			Ok(Some((full_message, surb))) => {
-				if let Err(e) =
-					results.start_send_unpin(WorkerOut::ReceivedMessage(peer, full_message, surb))
-				{
+			Ok(Some((message, kind))) => {
+				if let Err(e) = results.start_send_unpin(MixnetEvent::Message(DecodedMessage {
+					peer,
+					message,
+					kind,
+				})) {
 					log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
 					if e.is_disconnected() {
 						return false

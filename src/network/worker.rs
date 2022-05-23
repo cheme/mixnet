@@ -24,7 +24,7 @@
 use crate::{
 	core::{Config, MixEvent, MixPublicKey, Mixnet, Packet, SurbsPayload, Topology},
 	network::connection::Connection,
-	MessageType, SendOptions,
+	DecodedMessage, MessageType, MixnetEvent, SendOptions,
 };
 use futures::{
 	channel::{mpsc::SendError, oneshot::Sender as OneShotSender},
@@ -34,32 +34,16 @@ use libp2p_core::PeerId;
 use libp2p_swarm::NegotiatedSubstream;
 use std::task::{Context, Poll};
 
-pub type WorkerStream = Box<dyn Stream<Item = WorkerIn> + Unpin + Send>;
-pub type WorkerSink = Box<dyn Sink<WorkerOut, Error = SendError> + Unpin + Send>;
+pub type WorkerStream = Box<dyn Stream<Item = WorkerCommand> + Unpin + Send>;
+pub type WorkerSink = Box<dyn Sink<MixnetEvent, Error = SendError> + Unpin + Send>;
 
-pub enum WorkerIn {
+pub enum WorkerCommand {
 	RegisterMessage(Option<crate::MixPeerId>, Vec<u8>, SendOptions),
 	RegisterSurbs(Vec<u8>, SurbsPayload),
-	AddPeer(
-		PeerId,
-		Option<NegotiatedSubstream>,
-		NegotiatedSubstream,
-		OneShotSender<()>,
-	),
+	AddPeer(PeerId, Option<NegotiatedSubstream>, NegotiatedSubstream, OneShotSender<()>),
 	AddPeerInbound(PeerId, NegotiatedSubstream),
 	RemoveConnectedPeer(PeerId),
 	ImportExternalMessage(crate::MixPeerId, Packet),
-}
-
-// TODO consider simple mutex on peer connections.
-pub enum WorkerOut {
-	/// Message received from mixnet.
-	ReceivedMessage(crate::MixPeerId, Vec<u8>, MessageType),
-	/// Handshake success in mixnet.
-	Connected(PeerId, MixPublicKey),
-	/// Peer connection dropped, sending info to behaviour for
-	/// cleanup.
-	Disconnected(PeerId),
 }
 
 /// Embed mixnet and process queue of instruction.
@@ -103,7 +87,7 @@ impl<T: Topology> MixnetWorker<T> {
 		let mut result = Poll::Pending;
 		match self.worker_in.poll_next_unpin(cx) {
 			Poll::Ready(Some(message)) => match message {
-				WorkerIn::RegisterMessage(peer_id, message, send_options) => {
+				WorkerCommand::RegisterMessage(peer_id, message, send_options) => {
 					match self.mixnet.register_message(peer_id, None, message, send_options) {
 						Ok(()) => (),
 						Err(e) => {
@@ -112,7 +96,7 @@ impl<T: Topology> MixnetWorker<T> {
 					}
 					return Poll::Ready(true)
 				},
-				WorkerIn::RegisterSurbs(message, surb) => {
+				WorkerCommand::RegisterSurbs(message, surb) => {
 					match self.mixnet.register_surb(message, surb) {
 						Ok(()) => (),
 						Err(e) => {
@@ -121,7 +105,7 @@ impl<T: Topology> MixnetWorker<T> {
 					}
 					return Poll::Ready(true)
 				},
-				WorkerIn::AddPeer(peer, inbound, outbound, close_handler) => {
+				WorkerCommand::AddPeer(peer, inbound, outbound, close_handler) => {
 					if let Some(_con) = self.mixnet.connected_mut(&peer) {
 						log::error!("Trying to replace an existing connection for {:?}", peer);
 					} else {
@@ -133,7 +117,7 @@ impl<T: Topology> MixnetWorker<T> {
 					if !self.mixnet.accept_peer(&peer) {
 						log::trace!("Rejected peer {:?}", peer);
 						if let Err(e) =
-							self.worker_out.start_send_unpin(WorkerOut::Disconnected(peer))
+							self.worker_out.start_send_unpin(MixnetEvent::Disconnected(peer))
 						{
 							log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
 						}
@@ -146,7 +130,7 @@ impl<T: Topology> MixnetWorker<T> {
 					*/
 					log::trace!(target: "mixnet", "added peer out: {:?}", peer);
 				},
-				WorkerIn::AddPeerInbound(peer, inbound) => {
+				WorkerCommand::AddPeerInbound(peer, inbound) => {
 					if let Some(con) = self.mixnet.connected_mut(&peer) {
 						log::trace!(target: "mixnet", "Added inbound to peer: {:?}", peer);
 						con.set_inbound(inbound);
@@ -154,10 +138,10 @@ impl<T: Topology> MixnetWorker<T> {
 						log::warn!(target: "mixnet", "Received inbound for dropped peer: {:?}", peer);
 					}
 				},
-				WorkerIn::RemoveConnectedPeer(peer) => {
+				WorkerCommand::RemoveConnectedPeer(peer) => {
 					self.disconnect_peer(&peer);
 				},
-				WorkerIn::ImportExternalMessage(peer, packet) => {
+				WorkerCommand::ImportExternalMessage(peer, packet) => {
 					if !self.import_packet(peer, packet) {
 						return Poll::Ready(false)
 					};
@@ -178,7 +162,7 @@ impl<T: Topology> MixnetWorker<T> {
 				MixEvent::Disconnected(peers) =>
 					for peer in peers.into_iter() {
 						if let Err(e) =
-							self.worker_out.start_send_unpin(WorkerOut::Disconnected(peer))
+							self.worker_out.start_send_unpin(MixnetEvent::Disconnected(peer))
 						{
 							log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
 						}
@@ -192,7 +176,7 @@ impl<T: Topology> MixnetWorker<T> {
 	fn disconnect_peer(&mut self, peer: &PeerId) {
 		log::trace!(target: "mixnet", "Disconnecting peer {:?}", peer);
 		log::error!(target: "mixnet", "Disconnecting peer {:?}", peer);
-		if let Err(e) = self.worker_out.start_send_unpin(WorkerOut::Disconnected(peer.clone())) {
+		if let Err(e) = self.worker_out.start_send_unpin(MixnetEvent::Disconnected(peer.clone())) {
 			log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
 		}
 		self.mixnet.remove_connected_peer(peer);
@@ -200,12 +184,11 @@ impl<T: Topology> MixnetWorker<T> {
 
 	fn import_packet(&mut self, peer: crate::MixPeerId, packet: Packet) -> bool {
 		match self.mixnet.import_message(peer, packet) {
-			Ok(Some((full_message, surb))) => {
-				if let Err(e) = self.worker_out.start_send_unpin(WorkerOut::ReceivedMessage(
-					peer,
-					full_message,
-					surb,
-				)) {
+			Ok(Some((message, kind))) => {
+				if let Err(e) = self
+					.worker_out
+					.start_send_unpin(MixnetEvent::Message(DecodedMessage { peer, message, kind }))
+				{
 					log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
 					if e.is_disconnected() {
 						return false

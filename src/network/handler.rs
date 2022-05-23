@@ -20,7 +20,7 @@
 
 // libp2p connection handler for the mixnet protocol.
 
-use crate::network::{protocol, WorkerIn, WorkerSink};
+use crate::network::{protocol, SinkToWorker, WorkerCommand};
 use futures::prelude::*;
 use libp2p_core::{upgrade::NegotiationError, PeerId, UpgradeError};
 use libp2p_swarm::{
@@ -56,9 +56,7 @@ pub enum Failure {
 	/// The peer does not support the protocol.
 	Unsupported,
 	/// The protocol failed for some other reason.
-	Other {
-		error: Box<dyn std::error::Error + Send + 'static>,
-	},
+	Other { error: Box<dyn std::error::Error + Send + 'static> },
 }
 
 impl fmt::Display for Failure {
@@ -91,8 +89,8 @@ pub struct Handler {
 	do_outbound_query: bool,
 	/// Tracks the state of our handler.
 	state: State,
-	/// Send connection to worker.
-	mixnet_worker_sink: WorkerSink,
+	/// Send connection infos and streams to worker.
+	mixnet_worker_sink: SinkToWorker,
 	/// Receive connection close event when the connection sent to mixnet is dropped.
 	connection_closed: Option<futures::channel::oneshot::Receiver<()>>,
 
@@ -123,7 +121,7 @@ enum State {
 
 impl Handler {
 	/// Builds a new `Handler` with the given configuration.
-	pub fn new(config: Config, mixnet_worker_sink: WorkerSink) -> Self {
+	pub fn new(config: Config, mixnet_worker_sink: SinkToWorker) -> Self {
 		Handler {
 			config,
 			pending_errors: VecDeque::with_capacity(2),
@@ -147,13 +145,9 @@ impl Handler {
 					let (sender, r) = futures::channel::oneshot::channel();
 					self.connection_closed = Some(r);
 					log::trace!(target: "mixnet", "Sending peer to worker {:?}", peer);
-					if let Err(e) =
-						self.mixnet_worker_sink.as_mut().start_send_unpin(WorkerIn::AddPeer(
-							peer.clone(),
-							inbound,
-							outbound,
-							sender,
-						)) {
+					if let Err(e) = self.mixnet_worker_sink.as_mut().start_send_unpin(
+						WorkerCommand::AddPeer(peer.clone(), inbound, outbound, sender),
+					) {
 						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
 					}
 					if with_inbound {
@@ -174,10 +168,12 @@ impl Handler {
 					if let Err(e) = self
 						.mixnet_worker_sink
 						.as_mut()
-						.start_send_unpin(WorkerIn::AddPeerInbound(peer.clone(), inbound))
+						.start_send_unpin(WorkerCommand::AddPeerInbound(peer.clone(), inbound))
 					{
 						log::error!(target: "mixnet", "Error sending in worker sink {:?}", e);
+						self.pending_errors.push_front(Failure::Other { error: Box::new(e) });
 					}
+					self.state = State::Active;
 				},
 				_ => (),
 			}
@@ -201,19 +197,25 @@ impl ConnectionHandler for Handler {
 	fn inject_fully_negotiated_inbound(&mut self, stream: NegotiatedSubstream, _: ()) {
 		if self.state == State::ActiveNotSent || self.state == State::ActiveInboundNotSent {
 			self.inbound = Some(stream);
+			self.try_send_connected();
+		} else {
+			log::trace!(target: "mixnet", "Dropping inbound, one was already sent");
 		}
-		self.try_send_connected();
 	}
 
 	fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
 		if self.state == State::ActiveNotSent {
 			self.outbound = Some(stream);
+			self.try_send_connected();
+		} else {
+			log::trace!(target: "mixnet", "Dropping outbound, one was already sent");
 		}
-		self.try_send_connected();
 	}
 
 	fn inject_event(&mut self, peer: PeerId) {
-		if self.peer_id.is_none() {
+		if let Some(old_id) = self.peer_id.as_ref() {
+			log::trace!(target: "mixnet", "Dropping peer id {:?}, already got {:?}", peer, old_id);
+		} else {
 			self.peer_id = Some(peer);
 			self.try_send_connected();
 		}
@@ -235,7 +237,6 @@ impl ConnectionHandler for Handler {
 	}
 
 	fn connection_keep_alive(&self) -> KeepAlive {
-		// TODO keep alive only for actively routing in topology and if between to connected nodes?
 		KeepAlive::Yes
 	}
 
@@ -247,7 +248,7 @@ impl ConnectionHandler for Handler {
 			match r.poll_unpin(cx) {
 				Poll::Pending => (),
 				_ => {
-					log::trace!(target: "mixnet", "Close connection from handler");
+					log::trace!(target: "mixnet", "Connection closed, closing handler.");
 					return Poll::Ready(ConnectionHandlerEvent::Close(Failure::Unsupported))
 				},
 			}
@@ -278,7 +279,7 @@ impl ConnectionHandler for Handler {
 			return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol })
 		}
 
-		// This is suspending with no wake register, but is polled very often by libp2p.
+		// This is suspending with no wake register, but is still being polled very often by libp2p.
 		Poll::Pending
 	}
 }

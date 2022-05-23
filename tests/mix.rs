@@ -366,7 +366,7 @@ fn test_messages(
 							swarm.dial(rx.next().await.unwrap()).unwrap();
 						}
 					},
-					SwarmEvent::Behaviour(mixnet::NetworkEvent::Connected(_, _)) => {
+					SwarmEvent::Behaviour(mixnet::MixnetEvent::Connected(_, _)) => {
 						num_connected += 1;
 						log::trace!(target: "mixnet", "{} Connected  {}/{}", p, num_connected, num_peers - 1);
 						if num_connected == num_peers - 1 {
@@ -460,7 +460,7 @@ fn test_messages(
 			}
 			loop {
 				match swarm.select_next_some().await {
-					SwarmEvent::Behaviour(mixnet::NetworkEvent::Message(
+					SwarmEvent::Behaviour(mixnet::MixnetEvent::Message(
 						mixnet::DecodedMessage { peer, message, kind },
 					)) => {
 						received += 1;
@@ -496,7 +496,7 @@ fn test_messages(
 				match sender.select_next_some().await {
 					// TODO have surb original message (can be small vec id: make it an input
 					// param) attached.
-					SwarmEvent::Behaviour(mixnet::NetworkEvent::Message(
+					SwarmEvent::Behaviour(mixnet::MixnetEvent::Message(
 						mixnet::DecodedMessage { peer: _, message, kind: _ },
 					)) => {
 						assert!(message.as_slice() == b"pong");
