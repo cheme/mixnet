@@ -78,10 +78,6 @@ pub struct TransmitInfo {
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 enum ConnectedKind {
 	PendingHandshake,
-	// from routing node to external
-	Consumer,
-	// from external node connected to anything
-	External,
 	RoutingForward,
 	RoutingReceive,
 	RoutingReceiveForward,
@@ -99,14 +95,6 @@ impl ConnectedKind {
 
 	fn routing_receive(self) -> bool {
 		matches!(self, ConnectedKind::RoutingReceive | ConnectedKind::RoutingReceiveForward)
-	}
-
-	fn is_consumer(self) -> bool {
-		matches!(self, ConnectedKind::Consumer)
-	}
-
-	fn is_external(self) -> bool {
-		matches!(self, ConnectedKind::External)
 	}
 }
 
@@ -749,7 +737,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 
 		log::trace!(target: "mixnet", "Random path, length {:?}", num_hops);
 		self.topology.random_path(
-			start,
+			Some(start),
 			recipient,
 			count,
 			num_hops,
@@ -1010,17 +998,13 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			}
 		}
 
-		for (peer, (packet, external)) in recv_packets {
+		for (peer, packet) in recv_packets {
 			if !self.import_packet(peer, packet) {
 				// warning this only indicate a peer send wrong packet, but cannot presume
 				// who (can be external).
 				log::trace!(target: "mixnet", "Error importing packet, wrong format.");
 				if let Some(stats) = self.window.stats.as_mut() {
-					if external {
-						stats.number_from_external_received_valid += 1;
-					} else {
-						stats.number_received_valid += 1;
-					}
+					stats.number_received_valid += 1;
 				}
 			}
 		}
@@ -1326,7 +1310,6 @@ pub struct WindowStats {
 	pub number_received_valid: usize,
 	pub number_received_invalid: usize,
 
-	pub number_from_external_received_valid: usize,
 	pub number_from_external_received_invalid: usize,
 }
 
@@ -1345,12 +1328,6 @@ pub struct PeerCount {
 	/// Number of mixnet peer we proxy and receive
 	/// from.
 	pub nb_connected_receive_routing: usize,
-	/// Number of nodes consuming our mixnet
-	/// access.
-	pub nb_connected_external: usize,
-	/// Number of serving mode connected (when
-	/// we don't route).
-	pub nb_connected_consumer: usize,
 }
 
 impl PeerCount {
@@ -1363,8 +1340,7 @@ impl PeerCount {
 		self.nb_connected += 1;
 		if topology.can_route(peer) {
 			if !topology.can_route(local_id) {
-				self.nb_connected_consumer += 1;
-				ConnectedKind::Consumer
+				unreachable!()// TODO proper management like return option
 			} else if topology.routing_to(local_id, peer) {
 				self.nb_connected_forward_routing += 1;
 				if topology.routing_to(peer, local_id) {
@@ -1377,12 +1353,10 @@ impl PeerCount {
 				self.nb_connected_receive_routing += 1;
 				ConnectedKind::RoutingReceive
 			} else {
-				self.nb_connected_external += 1;
-				ConnectedKind::External
+				unreachable!()// TODO proper management like return option
 			}
 		} else {
-			self.nb_connected_external += 1;
-			ConnectedKind::External
+			unreachable!()// TODO proper management
 		}
 	}
 
@@ -1390,14 +1364,6 @@ impl PeerCount {
 		match kind {
 			ConnectedKind::PendingHandshake => {
 				self.nb_pending_handshake -= 1;
-			},
-			ConnectedKind::Consumer => {
-				self.nb_connected -= 1;
-				self.nb_connected_consumer -= 1;
-			},
-			ConnectedKind::External => {
-				self.nb_connected -= 1;
-				self.nb_connected_external -= 1;
 			},
 			ConnectedKind::RoutingReceive => {
 				self.nb_connected -= 1;

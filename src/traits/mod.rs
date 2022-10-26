@@ -63,13 +63,6 @@ pub trait Topology: Sized {
 		_num_hop: usize,
 	) -> Vec<(MixnetId, MixPublicKey)>;
 
-	/// Check if a peer is in topology, do not need to be connected.
-	fn is_first_node(&self, _id: &MixnetId) -> bool;
-
-	/// If external is allowed, it returns a ratio of
-	/// routing node bandwidth to use.
-	fn bandwidth_external(&self, _id: &MixnetId, peers: &PeerCount) -> Option<(usize, usize)>;
-
 	/// Check node links.
 	fn routing_to(&self, from: &MixnetId, to: &MixnetId) -> bool;
 
@@ -82,10 +75,12 @@ pub trait Topology: Sized {
 	/// routing peers is used.
 	///	E.g. this can select a random validator that can accept the blockchain
 	/// transaction into the block.
+	/// Start node is only defined for routing nodes, external node can still
+	/// force the first node but don't have to.
 	/// Error when no recipient is reachable.
 	fn random_path(
 		&mut self,
-		start_node: (&MixnetId, Option<&MixPublicKey>),
+		start_node: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		recipient_node: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		count: usize,
 		num_hops: usize,
@@ -117,7 +112,7 @@ pub trait Topology: Sized {
 	fn should_connect_to(&self) -> ShouldConnectTo;
 
 	/// Is peer allowed to connect to our node.
-	fn accept_peer(&self, peer_id: &MixnetId, peers: &PeerCount) -> bool;
+	fn accept_peer(&self, peer_id: &MixnetId) -> bool;
 
 	/// A new static routing set was globally defined.
 	fn handle_new_routing_set(&mut self, set: NewRoutingSet);
@@ -171,13 +166,9 @@ impl Topology for NoTopology {
 		false
 	}
 
-	fn bandwidth_external(&self, _id: &MixnetId, _: &PeerCount) -> Option<(usize, usize)> {
-		Some((1, 1))
-	}
-
 	fn random_path(
 		&mut self,
-		from: (&MixnetId, Option<&MixPublicKey>),
+		from: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		recipient: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		count: usize,
 		_num_hops: usize,
@@ -192,7 +183,7 @@ impl Topology for NoTopology {
 			// Select a random connected peer
 			self.connected_peers
 				.iter()
-				.filter(|(k, _v)| k != &from.0)
+				.filter(|(k, _v)| Some(k) != from.as_ref().map(|f| &f.0))
 				.choose(&mut rng)
 				.map(|(k, v)| (k, Some(v)))
 		});
@@ -219,10 +210,6 @@ impl Topology for NoTopology {
 		Vec::new()
 	}
 
-	fn is_first_node(&self, _id: &MixnetId) -> bool {
-		true
-	}
-
 	fn routing_to(&self, _from: &MixnetId, _to: &MixnetId) -> bool {
 		true
 	}
@@ -235,7 +222,7 @@ impl Topology for NoTopology {
 		self.connected_peers.remove(id);
 	}
 
-	fn accept_peer(&self, _: &MixnetId, _: &PeerCount) -> bool {
+	fn accept_peer(&self, _: &MixnetId) -> bool {
 		true
 	}
 

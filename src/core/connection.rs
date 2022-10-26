@@ -44,7 +44,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) enum ConnectionEvent {
 	Established(MixnetId, MixPublicKey),
-	Received((Packet, bool)),
+	Received(Packet),
 	Broken(Option<MixnetId>),
 	None,
 }
@@ -87,7 +87,7 @@ pub(crate) struct ManagedConnection<C> {
 	// Using an internal buffer we can just drop connection earlier
 	// by receiving all and dropping when this buffer grow out
 	// of the expected badwidth limits.
-	receive_buffer: Option<(VecDeque<(Packet, bool)>, usize, usize)>,
+	receive_buffer: Option<(VecDeque<Packet>, usize, usize)>,
 	stats: Option<(ConnectionStats, Option<PacketType>)>,
 }
 
@@ -305,7 +305,7 @@ impl<C: Connection> ManagedConnection<C> {
 				if let Some((peer_id, pk)) =
 					topology.check_handshake(handshake.as_slice(), &self.network_id)
 				{
-					let accepted = topology.accept_peer(&peer_id, peers);
+					let accepted = topology.accept_peer(&peer_id);
 					self.mixnet_id = Some(peer_id);
 					self.public_key = Some(pk);
 					self.handshake_received = true;
@@ -361,12 +361,12 @@ impl<C: Connection> ManagedConnection<C> {
 		&mut self,
 		packet: QueuedPacket,
 		packet_per_window: usize,
-		topology: &impl Topology,
-		peers: &PeerCount,
+		_topology: &impl Topology, // TODO rem param
+		_peers: &PeerCount, // TODO rem param
 	) -> Result<(), crate::Error> {
 		if let Some(peer_id) = self.mixnet_id.as_ref() {
 			if packet.injected_packet() {
-				if !(self.kind.is_consumer() ||
+				if !(
 					self.kind.routing_forward() ||
 					self.gracefull_nb_packet_send > 0)
 				{
@@ -389,9 +389,8 @@ impl<C: Connection> ManagedConnection<C> {
 				return Err(crate::Error::QueueFull)
 			}
 
-			if !(self.kind.is_consumer() ||
+			if !(
 				self.kind.routing_forward() ||
-				topology.bandwidth_external(peer_id, peers).is_some() ||
 				self.gracefull_nb_packet_send > 0)
 			{
 				log::trace!(target: "mixnet", "Dropping a queued packet, not in topology or allowed external.");
@@ -553,18 +552,17 @@ impl<C: Connection> ManagedConnection<C> {
 			}
 
 			// Limit reception.
-			let (current, external) = if self.kind.routing_receive() {
-				(window.current_packet_limit, false)
+			let current = if self.kind.routing_receive() {
+				window.current_packet_limit
 			} else {
-				let (n, d) = topology.bandwidth_external(&peer_id, peers).unwrap_or((0, 1));
-				((window.current_packet_limit * n) / d, true)
+				return self.broken_connection(topology, peers);
 			};
 			let current = if self.gracefull_nb_packet_receive > 0 {
 				window.current_packet_limit / 2
 			} else {
 				current
 			};
-			let can_receive = self.recv_in_window < current || self.kind.is_external();
+			let can_receive = self.recv_in_window < current;
 			if self.receive_buffer.is_some() || can_receive {
 				loop {
 					match self.try_recv_packet(cx, window.current) {
@@ -581,13 +579,13 @@ impl<C: Connection> ManagedConnection<C> {
 							}
 
 							if let Some((buf, underbuf, limit)) = self.receive_buffer.as_mut() {
-								buf.push_back((packet, external));
+								buf.push_back(packet);
 								if buf.len() > *limit + *underbuf {
 									log::warn!(target: "mixnet", "Disconnecting, received too many messages");
 									return self.broken_connection(topology, peers)
 								}
 							} else {
-								result = Poll::Ready(ConnectionEvent::Received((packet, external)));
+								result = Poll::Ready(ConnectionEvent::Received(packet));
 								break
 							}
 						},
@@ -609,7 +607,7 @@ impl<C: Connection> ManagedConnection<C> {
 				if self.current_window + Wrapping(1) != window.current {
 					let skipped = window.current - self.current_window;
 					log::error!(target: "mixnet", "Window skipped {:?} ignoring report.", skipped);
-				} else if !external {
+				} else {
 					let packet_per_window_less_margin =
 						window.packet_per_window * (100 - WINDOW_MARGIN_PERCENT) / 100;
 					if self.sent_in_window < packet_per_window_less_margin {

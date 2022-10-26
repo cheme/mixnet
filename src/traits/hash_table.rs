@@ -127,8 +127,6 @@ pub struct TopologyHashTable<C: Configuration> {
 	// Can be redundant with `routing_set`.
 	routing_peers: BTreeMap<MixnetId, RoutingTable<C::Version>>,
 
-	target_bytes_per_seconds: usize,
-
 	params: Parameters,
 
 	// all path of a given size.
@@ -196,11 +194,6 @@ impl<C: Configuration> Topology for TopologyHashTable<C> {
 			.collect()
 	}
 
-	fn is_first_node(&self, id: &MixnetId) -> bool {
-		// allow for all
-		self.can_route(id)
-	}
-
 	fn routing_to(&self, from: &MixnetId, to: &MixnetId) -> bool {
 		if &self.local_id == from {
 			if self.routing {
@@ -218,7 +211,7 @@ impl<C: Configuration> Topology for TopologyHashTable<C> {
 
 	fn random_path(
 		&mut self,
-		start_node: (&MixnetId, Option<&MixPublicKey>),
+		start_node: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		recipient_node: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		nb_chunk: usize,
 		mut num_hops: usize,
@@ -230,7 +223,7 @@ impl<C: Configuration> Topology for TopologyHashTable<C> {
 			return Err(Error::NotEnoughRoutingPeers)
 		}
 
-		let (start, recipient, add_start, add_end) = self.reachable(
+		let (start, recipient) = self.reachable(
 			start_node,
 			recipient_node,
 			&mut num_hops,
@@ -247,10 +240,6 @@ impl<C: Configuration> Topology for TopologyHashTable<C> {
 					return Err(Error::NoPath(Some(recipient)))
 				};
 			let mut path = Vec::with_capacity(num_hops + 1);
-			if let Some((peer, key)) = add_start {
-				debug!(target: "mixnet", "Add first, nexts {:?}.", path_ids.len());
-				path.push((peer, key));
-			}
 
 			for peer_id in path_ids.into_iter() {
 				if let Some(table) = self.routing_peers.get(&peer_id) {
@@ -270,15 +259,6 @@ impl<C: Configuration> Topology for TopologyHashTable<C> {
 				return Err(Error::NotEnoughRoutingPeers)
 			}
 
-			if add_end {
-				if let Some((peer, key)) = recipient_node {
-					if let Some(key) = key {
-						path.push((*peer, *key));
-					} else {
-						return Err(Error::NoPath(Some(*peer)))
-					}
-				}
-			}
 			result.push(path);
 		}
 		debug!(target: "mixnet", "Path: {:?}", result);
@@ -305,32 +285,7 @@ impl<C: Configuration> Topology for TopologyHashTable<C> {
 		self.distributed_try_connect();
 	}
 
-	fn bandwidth_external(&self, id: &MixnetId, peers: &PeerCount) -> Option<(usize, usize)> {
-		if !self.routing && self.can_route(id) {
-			// expect surbs: TODO make it optional??
-			return Some((1, 1))
-		}
-		// TODO can cache this result (Option<Option<(usize, usize))
-
-		let nb_external = peers.nb_connected_external + 1;
-
-		let forward_bandwidth = ((C::EXTERNAL_BANDWIDTH.0 + C::EXTERNAL_BANDWIDTH.1) *
-			peers.nb_connected_forward_routing *
-			self.target_bytes_per_seconds) /
-			C::EXTERNAL_BANDWIDTH.1;
-		let receive_bandwidth = peers.nb_connected_receive_routing * self.target_bytes_per_seconds;
-
-		let available_bandwidth = if forward_bandwidth > receive_bandwidth {
-			forward_bandwidth - receive_bandwidth
-		} else {
-			0
-		};
-		let available_per_external = available_bandwidth / nb_external;
-
-		Some((available_per_external, self.target_bytes_per_seconds))
-	}
-
-	fn accept_peer(&self, peer_id: &MixnetId, peers: &PeerCount) -> bool {
+	fn accept_peer(&self, peer_id: &MixnetId) -> bool {
 		if C::DISTRIBUTE_ROUTES {
 			// Allow any allowed routing peers as it can be any of the should_connect_to in case
 			// there is many disconnected.
@@ -338,18 +293,9 @@ impl<C: Configuration> Topology for TopologyHashTable<C> {
 				return true
 			}
 		}
-		if self.routing {
+		self.routing  && (
 			self.routing_to(peer_id, &self.local_id) ||
-				self.routing_to(&self.local_id, peer_id) ||
-				(!self.can_route(peer_id) &&
-					peers.nb_connected_external <
-						self.params.max_external.unwrap_or(usize::MAX) &&
-					self.bandwidth_external(peer_id, peers).is_some())
-		} else {
-			// connect as many routing node as possible
-			self.can_route(peer_id) &&
-				peers.nb_connected_external < self.params.max_external.unwrap_or(usize::MAX)
-		}
+				self.routing_to(&self.local_id, peer_id) )
 	}
 
 	fn should_connect_to(&self) -> ShouldConnectTo {
@@ -377,7 +323,6 @@ impl<C: Configuration> TopologyHashTable<C> {
 	pub fn new(
 		local_id: MixnetId,
 		node_public_key: MixPublicKey,
-		config: &crate::Config,
 		params: Parameters,
 		routing_table_version: C::Version,
 	) -> Self {
@@ -401,8 +346,6 @@ impl<C: Configuration> TopologyHashTable<C> {
 			routing_table,
 			paths: Default::default(),
 			paths_depth: 0,
-			//disconnected_in_routing: Default::default(),
-			target_bytes_per_seconds: config.target_bytes_per_second as usize,
 			params,
 			should_connect_to: Default::default(),
 			should_connect_pending: Default::default(),
@@ -810,35 +753,33 @@ impl<C: Configuration> TopologyHashTable<C> {
 
 	fn reachable(
 		&mut self,
-		start_node: (&MixnetId, Option<&MixPublicKey>),
+		start_node: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		recipient_node: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		num_hops: &mut usize,
 		max_hops: usize,
 		query_path_for_surb: Option<&Vec<(MixnetId, MixPublicKey)>>,
-	) -> Result<(MixnetId, MixnetId, Option<(MixnetId, MixPublicKey)>, bool), Error> {
+	) -> Result<(MixnetId, MixnetId), Error> {
 		debug_assert!(!(recipient_node.is_none() && query_path_for_surb.is_some()));
-		let mut add_start = None;
-		let mut add_end = false;
-		let mut is_external = false;
-		let recipient_id = recipient_node.as_ref().map(|r| r.0);
-		let start = if self.is_first_node(start_node.0) {
-			*start_node.0
-		} else {
-			is_external = true;
-			trace!(target: "mixnet", "External node");
-			if *num_hops + 1 > max_hops {
-				return Err(Error::TooManyHops)
+		let (is_external, start) = if let Some(start) = start_node {
+			if self.can_route(start.0) {
+				(false, Some(*start.0))
+			} else {
+				(true, None)
 			}
-
-			let firsts = self.first_hop_nodes_external(start_node.0, recipient_id, *num_hops);
+		} else {
+			(true, None)
+		};
+		let recipient_id = recipient_node.as_ref().map(|r| r.0);
+		let start = if let Some(start) = start {
+			start
+		} else {
+			let firsts = self.first_hop_nodes_external(&self.local_id, recipient_id, *num_hops);
 			if firsts.is_empty() {
 				return Err(Error::NoPath(recipient_id.cloned()))
 			}
 			let mut rng = rand::thread_rng();
 			use rand::Rng;
 			let n: usize = rng.gen_range(0..firsts.len());
-			add_start = Some(firsts[n]);
-			// TODO could check for biggest number of paths from all first nodes
 			firsts[n].0
 		};
 		let recipient = recipient_id
@@ -847,22 +788,7 @@ impl<C: Configuration> TopologyHashTable<C> {
 					Ok(*id)
 				} else {
 					trace!(target: "mixnet", "Non routing recipient");
-					if *num_hops + 1 > max_hops {
-						return Err(Error::TooManyHops)
-					}
-
-					if let Some(query) = query_path_for_surb {
-						// use again a node that was recently connected.
-						if let Some(rec) = query.get(0) {
-							trace!(target: "mixnet", "Surbs last: {:?}", rec);
-							add_end = true;
-							Ok(rec.0)
-						} else {
-							Err(Error::NoPath(Some(*id)))
-						}
-					} else {
-						Err(Error::NoPath(Some(*id)))
-					}
+					return Err(Error::NoPath(Some(*id)))
 				}
 			})
 			.transpose()?;
@@ -886,7 +812,7 @@ impl<C: Configuration> TopologyHashTable<C> {
 								self.layered_routing_set.len(),
 								*num_hops,
 							);
-							if (distance + is_external as usize) <= max_hops {
+							if distance <= max_hops {
 								*num_hops = distance;
 								is_accessible = true;
 							}
@@ -924,7 +850,7 @@ impl<C: Configuration> TopologyHashTable<C> {
 			return Err(Error::NoPath(Some(recipient)))
 		};
 		trace!(target: "mixnet", "enough paths: {:?}", nb_path);
-		Ok((start, recipient, add_start, add_end))
+		Ok((start, recipient))
 	}
 }
 

@@ -133,13 +133,9 @@ impl Topology for TopologyGraph {
 		vec![self.peers[0]]
 	}
 
-	fn is_first_node(&self, id: &MixnetId) -> bool {
-		self.peers.iter().any(|(p, _)| p == id)
-	}
-
 	fn random_path(
 		&mut self,
-		start_node: (&MixnetId, Option<&MixPublicKey>),
+		start_node: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		recipient_node: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		count: usize,
 		num_hops: usize,
@@ -153,10 +149,10 @@ impl Topology for TopologyGraph {
 		let mut add_start = None;
 		let mut add_end = None;
 		let recipient_id = recipient_node.map(|r| r.0);
-		let start = if self.is_first_node(start_node.0) {
+		let start = if let Some(start_node) = start_node {
 			*start_node.0
 		} else {
-			let firsts = self.first_hop_nodes_external(start_node.0, recipient_id, num_hops);
+			let firsts = self.first_hop_nodes_external(self.local_id.as_ref().unwrap(), recipient_id, num_hops);
 			if firsts.is_empty() {
 				return Err(Error::NoPath(recipient_id.cloned()))
 			}
@@ -181,7 +177,7 @@ impl Topology for TopologyGraph {
 		} else {
 			self.peers
 				.iter()
-				.filter(|(k, _v)| k != start_node.0)
+				.filter(|(k, _v)| Some(k) != start_node.as_ref().map(|s| s.0))
 				.choose(&mut rand::thread_rng())
 				.map(|(k, _)| *k)
 				.ok_or(Error::NoPath(None))?
@@ -240,21 +236,10 @@ impl Topology for TopologyGraph {
 		}
 	}
 
-	fn bandwidth_external(&self, id: &MixnetId, _peers: &PeerCount) -> Option<(usize, usize)> {
-		if self.external.as_ref() == Some(id) {
-			return Some((1, 1))
-		}
-		if self.external.is_some() {
-			return None
-		}
-		Some((1, 1))
-	}
-
-	fn accept_peer(&self, peer_id: &MixnetId, peers: &PeerCount) -> bool {
+	fn accept_peer(&self, peer_id: &MixnetId) -> bool {
 		if let Some(local_id) = self.local_id.as_ref() {
 			self.routing_to(local_id, peer_id) ||
-				self.routing_to(peer_id, local_id) ||
-				self.bandwidth_external(peer_id, peers).is_some()
+				self.routing_to(peer_id, local_id) 
 		} else {
 			false
 		}
@@ -299,7 +284,7 @@ fn gen_paths(
 }
 
 fn test_messages(conf: TestConfig) {
-	let TestConfig { num_peers, message_size, from_external, .. } = conf;
+	let TestConfig { num_peers, message_size, .. } = conf;
 
 	let seed: u64 = 0;
 	let single_thread = false;
@@ -354,7 +339,6 @@ fn test_messages(conf: TestConfig) {
 
 	let (handles, _) = common::spawn_swarms(
 		num_peers,
-		from_external,
 		&executor,
 		&mut rng,
 		&config_proto,
@@ -363,7 +347,6 @@ fn test_messages(conf: TestConfig) {
 
 	let (nodes, mut with_swarm_channels) = common::spawn_workers::<ConfigGraph>(
 		num_peers,
-		from_external,
 		expect_all_connected,
 		handles,
 		&executor,
@@ -372,14 +355,9 @@ fn test_messages(conf: TestConfig) {
 
 	wait_on_connections(&conf, with_swarm_channels.as_mut());
 
-	let send = if from_external {
-		// ext 1 can route through peer 0 (only peer accepting ext)
-		vec![SendConf { from: num_peers, to: Some(1), message: source_message.clone() }]
-	} else {
-		(1..num_peers)
+	let send: Vec<_> = (1..num_peers)
 			.map(|to| SendConf { from: 0, to: Some(to), message: source_message.clone() })
-			.collect()
-	};
+			.collect();
 	send_messages(&conf, send.clone().into_iter(), &nodes, &mut with_swarm_channels);
 	wait_on_messages(&conf, send.into_iter(), &mut with_swarm_channels, b"pong");
 }
@@ -392,7 +370,6 @@ fn message_exchange_no_surb() {
 		message_count: 10,
 		message_size: 1,
 		with_surb: false,
-		from_external: false,
 		random_dest: false,
 	})
 }
@@ -405,7 +382,6 @@ fn fragmented_messages_no_surb() {
 		message_count: 1,
 		message_size: 8 * 1024,
 		with_surb: false,
-		from_external: false,
 		random_dest: false,
 	})
 }
@@ -418,7 +394,6 @@ fn message_exchange_with_surb() {
 		message_count: 10,
 		message_size: 1,
 		with_surb: true,
-		from_external: false,
 		random_dest: false,
 	})
 }
@@ -431,33 +406,6 @@ fn fragmented_messages_with_surb() {
 		message_count: 1,
 		message_size: 8 * 1024,
 		with_surb: true,
-		from_external: false,
-		random_dest: false,
-	})
-}
-
-#[test]
-fn from_external_with_surb() {
-	test_messages(TestConfig {
-		num_peers: 5,
-		num_hops: 3,
-		message_count: 1,
-		message_size: 100,
-		with_surb: true,
-		from_external: true,
-		random_dest: false,
-	})
-}
-
-#[test]
-fn from_external_no_surb() {
-	test_messages(TestConfig {
-		num_peers: 5,
-		num_hops: 3,
-		message_count: 1,
-		message_size: 4 * 1024,
-		with_surb: false,
-		from_external: true,
 		random_dest: false,
 	})
 }
