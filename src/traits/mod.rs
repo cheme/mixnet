@@ -283,13 +283,17 @@ impl Handshake for NoTopology {
 
 /// Primitives needed from a network connection.
 pub trait Connection {
-	/// Start sending a message. This trait expects to queue a single message
-	/// and return the message back if another message is currently being send.
-	fn try_queue_send(&mut self, message: Vec<u8>) -> Option<Vec<u8>>;
+	/// Is queue empty and connection ready for next message.
+	fn can_queue_send(&self) -> bool;
+
+	/// Queue a message, `can_queue_send` must be `true`.
+	fn queue_send(&mut self, header: Option<u8>, message: Vec<u8>);
+
 	/// Send and flush, return true when queued message is written and flushed.
 	/// Return false if ignored (no queued message).
 	/// Return Error if connection broke.
 	fn send_flushed(&mut self, cx: &mut Context) -> Poll<Result<bool, ()>>;
+
 	/// Try receive a packet of a given size.
 	/// Maximum supported size is `PACKET_SIZE`, return error otherwise.
 	fn try_recv(&mut self, cx: &mut Context, size: usize) -> Poll<Result<Option<Vec<u8>>, ()>>;

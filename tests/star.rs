@@ -381,7 +381,7 @@ fn fragmented_messages_no_surb() {
 }
 
 #[test]
-fn message_exchange_with_surb() {
+fn message_exchange_with_surb2() {
 	test_messages(TestConfig {
 		num_peers: 5,
 		num_hops: 3,

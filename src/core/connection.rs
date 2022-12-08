@@ -257,7 +257,8 @@ impl<C: Connection> ManagedConnection<C> {
 				log::trace!(target: "mixnet", "Cannot create handshake with {}", self.network_id);
 				return Poll::Ready(Err(()))
 			};
-			if self.connection.try_queue_send(handshake).is_none() {
+			if self.connection.can_queue_send() {
+				self.connection.queue_send(None, handshake);
 				self.handshake_queue = true;
 			} else {
 				// should not happen as handshake is first ever paquet.
@@ -306,15 +307,6 @@ impl<C: Connection> ManagedConnection<C> {
 			},
 			Poll::Pending => Poll::Pending,
 		}
-	}
-
-	// return packet if already sending one.
-	pub fn try_queue_send_packet(&mut self, packet: Vec<u8>) -> Option<Vec<u8>> {
-		if !self.kind.is_mixnet_routing() {
-			log::error!(target: "mixnet", "Peer {:?} not ready, dropping a packet", self.network_id);
-			return None
-		}
-		self.connection.try_queue_send(packet)
 	}
 
 	fn try_recv_handshake(
@@ -525,14 +517,17 @@ impl<C: Connection> ManagedConnection<C> {
 					Poll::Ready(Ok(false)) => {
 						// nothing in queue, get next.
 						if let Some(packet) = self.next_packet.take() {
-							if let Some(unsend) = self.try_queue_send_packet(packet.0) {
+							if self.connection.can_queue_send() {
+								self.connection.queue_send(None, packet.0);
+								if let Some(stats) = self.stats.as_mut() {
+									stats.1 = Some(packet.1);
+								}
+							} else {
 								log::error!(target: "mixnet", "try send should not fail on flushed queue.");
 								if let Some((stats, _)) = self.stats.as_mut() {
 									stats.failure_packet(Some(packet.1));
 								}
-								self.next_packet = Some((unsend, packet.1));
-							} else if let Some(stats) = self.stats.as_mut() {
-								stats.1 = Some(packet.1);
+								self.next_packet = Some(packet);
 							}
 							continue
 						}
