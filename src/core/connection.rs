@@ -464,7 +464,7 @@ impl<C: Connection> ManagedConnection<C> {
 			}
 		}
 
-		let mut result = Poll::Pending;
+		let mut result = Poll::Ready(ConnectionEvent::None);
 
 		if self.kind.is_pending_handshake()
 			// TODO this disconnected condition is needed for session change
@@ -519,10 +519,10 @@ impl<C: Connection> ManagedConnection<C> {
 						Poll::Ready(Err(())) => {
 							return self.broken_connection(topology, peers)
 						},
-						Poll::Pending =>(),
-							/*if matches!(result, Poll::Ready(ConnectionEvent::None)) {
+						Poll::Pending =>
+							if matches!(result, Poll::Ready(ConnectionEvent::None)) {
 								result = Poll::Pending
-							},*/
+							},
 					}
 				}
 
@@ -552,10 +552,11 @@ impl<C: Connection> ManagedConnection<C> {
 						return self.broken_connection(topology, peers)
 					},
 					Poll::Pending => {
-						/*
 						if matches!(result, Poll::Ready(ConnectionEvent::None)) {
 							result = Poll::Pending
 						}
+
+						/*
 
 						// do not swich kind unless all is really flushed
 						return result */
@@ -565,10 +566,11 @@ impl<C: Connection> ManagedConnection<C> {
 				break
 			}
 
-
-			if self.handshake_sent && self.handshake_received {
+			if self.handshake_sent && self.handshake_received && self.kind.is_pending_handshake() {
 				log::debug!(target: "mixnet", "Handshake success from {:?} to {:?}", self.local_id, self.handshake_done_id);
-				if let (Some(mixnet_id), Some(public_key)) = (self.handshake_done_id, self.public_key) {
+				if let (Some(mixnet_id), Some(public_key)) =
+					(self.handshake_done_id, self.public_key)
+				{
 					self.current_window = window.current;
 					self.sent_in_window = window.current_packet_limit;
 					self.recv_in_window = window.current_packet_limit;
@@ -602,6 +604,10 @@ impl<C: Connection> ManagedConnection<C> {
 								return self.broken_connection(topology, peers)
 							}
 						}
+						if matches!(result, Poll::Pending) {
+							result = Poll::Ready(ConnectionEvent::None);
+						}
+
 						break
 					},
 					Poll::Ready(Ok(false)) => {
@@ -655,7 +661,12 @@ impl<C: Connection> ManagedConnection<C> {
 						}
 					},
 					Poll::Ready(Err(())) => return self.broken_connection(topology, peers),
-					Poll::Pending => break,
+					Poll::Pending => {
+						if matches!(result, Poll::Ready(ConnectionEvent::None)) {
+							result = Poll::Pending
+						}
+						break
+					},
 				}
 			}
 
@@ -694,7 +705,12 @@ impl<C: Connection> ManagedConnection<C> {
 							}
 						},
 						Poll::Ready(Err(())) => return self.broken_connection(topology, peers),
-						Poll::Pending => break,
+						Poll::Pending => {
+							if matches!(result, Poll::Ready(ConnectionEvent::None)) {
+								result = Poll::Pending
+							}
+							break
+						},
 					}
 				}
 
@@ -735,7 +751,7 @@ impl<C: Connection> ManagedConnection<C> {
 			}
 		} else {
 			log::trace!(target: "mixnet", "No sphinx id, dropping.");
-			return Poll::Ready(ConnectionEvent::None)
+			return self.broken_connection(topology, peers)
 		}
 
 		match self.read_timeout.poll_unpin(cx) {
@@ -743,7 +759,11 @@ impl<C: Connection> ManagedConnection<C> {
 				log::trace!(target: "mixnet", "Peer, nothing received for too long, dropping.");
 				return self.broken_connection(topology, peers)
 			},
-			Poll::Pending => (),
+			Poll::Pending => {
+							if matches!(result, Poll::Ready(ConnectionEvent::None)) {
+								result = Poll::Pending
+							}
+			},
 		}
 		result
 	}
