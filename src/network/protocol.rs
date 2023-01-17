@@ -61,7 +61,9 @@ pub async fn send_message<S>(mut stream: S, message: Vec<u8>) -> io::Result<S>
 where
 	S: AsyncRead + AsyncWrite + Unpin,
 {
-	let size: [u8; 4] = (message.len() as u32).to_le_bytes();
+	let size: [u8; 4] = (message.len() as u32).to_le_bytes(); // TODO after removing handshake all
+														  // message of length of packet -> rem
+														  // this
 	stream.write_all(&size).await?;
 	stream.write_all(&message).await?;
 	stream.flush().await?;
@@ -73,7 +75,10 @@ pub async fn recv_message<S>(mut stream: S) -> io::Result<(S, Vec<u8>)>
 where
 	S: AsyncRead + AsyncWrite + Unpin,
 {
-	let mut size: [u8; 4] = Default::default();
+	let mut size: [u8; 4] = Default::default(); // TODO after removing handshake all
+											// message of length of packet -> rem
+											// this
+
 	stream.read_exact(&mut size).await?;
 	let mut message = Vec::new();
 	message.resize(u32::from_le_bytes(size) as usize, 0u8);

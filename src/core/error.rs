@@ -19,7 +19,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 /// Error handling
-use crate::core::{sphinx::Error as SphinxError, MixPeerId, SphinxPeerId};
+use crate::core::sphinx::Error as SphinxError;
+use crate::MixnetId;
 use std::fmt;
 
 /// Mixnet generic error.
@@ -30,15 +31,37 @@ pub enum Error {
 	/// Sphinx format error.
 	SphinxError(SphinxError),
 	/// No path to give peer or no random peer to select from.
-	NoPath(Option<MixPeerId>),
+	NoPath(Option<MixnetId>),
+	/// Not enough peers.
+	NotEnoughRoutingPeers,
 	/// Invalid network id.
-	InvalidId(MixPeerId),
+	InvalidId(libp2p_core::PeerId),
 	/// Invalid id in the Sphinx packet.
-	InvalidSphinxId(SphinxPeerId),
+	InvalidSphinxId(MixnetId),
 	/// Invalid message fragment format.
 	BadFragment,
 	/// Packet queue is full.
 	QueueFull,
+	/// Requested number of hop is too big.
+	TooManyHops,
+	/// Messages received from a peer exceed allowed bandwidth.
+	TooManyMessages,
+	/// Surbs message exceed single fragment length.
+	BadSurbsLength,
+	/// Worker channel is full.
+	WorkerChannelFull,
+	/// Destination peer not connected.
+	/// Depending on use case, dial could be attempted here.
+	Unreachable,
+	/// No sphinx id from handshake.
+	NoSphinxId,
+	/// Mixnet not ready.
+	NotReady,
+	/// Mixnet not connected externally (cannot send meta message
+	/// while routing).
+	NotExternal,
+	/// Other.
+	Other(String),
 }
 
 impl fmt::Display for Error {
@@ -46,16 +69,28 @@ impl fmt::Display for Error {
 		match self {
 			Error::MessageTooLarge => write!(f, "Mix message is too large."),
 			Error::SphinxError(e) => write!(f, "Sphinx packet format error: {:?}.", e),
-			Error::NoPath(p) => write!(
-				f,
-				"No path to {}.",
-				p.map(|p| p.to_string()).unwrap_or_else(|| "unknown peer".into())
-			),
+			Error::NoPath(p) => write!(f, "No path to {:?}.", p),
+			Error::NotEnoughRoutingPeers => write!(f, "Not enough routing peers."),
 			Error::InvalidId(id) => write!(f, "Invalid peer id: {}.", id),
 			Error::InvalidSphinxId(id) =>
 				write!(f, "Invalid peer id in the Sphinx packet: {:?}.", id),
 			Error::BadFragment => write!(f, "Bad message fragment."),
+			Error::BadSurbsLength => write!(f, "Surbs message too long."),
 			Error::QueueFull => write!(f, "Packet queue is full."),
+			Error::WorkerChannelFull => write!(f, "Worker channel is full."),
+			Error::TooManyHops => write!(f, "Too many hops for mixnet."),
+			Error::TooManyMessages => write!(f, "Too many message from peer."),
+			Error::Unreachable => write!(f, "Destination peer not connected."),
+			Error::NoSphinxId => write!(f, "Sphinx Id not obtain from handshake."),
+			Error::NotReady => write!(f, "Mixnet not ready."),
+			Error::NotExternal => write!(f, "Mixnet not externally connected."),
+			Error::Other(e) => write!(f, "Other: {}", e),
 		}
+	}
+}
+
+impl std::error::Error for Error {
+	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+		None
 	}
 }

@@ -20,12 +20,12 @@
 
 // libp2p connection handler for the mixnet protocol.
 
-use crate::network::protocol;
+use crate::{core::Packet, network::protocol};
 use futures::{future::BoxFuture, prelude::*};
 use libp2p_core::{upgrade::NegotiationError, UpgradeError};
 use libp2p_swarm::{
-	KeepAlive, NegotiatedSubstream, ProtocolsHandler, ProtocolsHandlerEvent,
-	ProtocolsHandlerUpgrErr, SubstreamProtocol,
+	ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive,
+	NegotiatedSubstream, SubstreamProtocol,
 };
 use std::{
 	collections::VecDeque,
@@ -48,10 +48,6 @@ impl Config {
 		Self { connection_timeout: Duration::new(10, 0) }
 	}
 }
-
-/// The message event
-#[derive(Debug)]
-pub struct Message(pub Vec<u8>);
 
 /// An outbound failure.
 #[derive(Debug)]
@@ -102,7 +98,7 @@ pub struct Handler {
 	inbound: Option<MessageFuture>,
 	/// Tracks the state of our handler.
 	state: State,
-	pending_message: Option<Message>,
+	pending_packet: Option<Packet>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,13 +123,13 @@ impl Handler {
 			outbound: None,
 			inbound: None,
 			state: State::Active,
-			pending_message: None,
+			pending_packet: None,
 		}
 	}
 }
 
-impl ProtocolsHandler for Handler {
-	type InEvent = Message;
+impl ConnectionHandler for Handler {
+	type InEvent = Packet;
 	type OutEvent = crate::network::Result;
 	type Error = Failure;
 	type InboundProtocol = protocol::Mixnet;
@@ -150,8 +146,8 @@ impl ProtocolsHandler for Handler {
 	}
 
 	fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
-		if let Some(message) = self.pending_message.take() {
-			let Message(message) = message;
+		if let Some(message) = self.pending_packet.take() {
+			let Packet(message) = message;
 			let stream = protocol::send_message(stream, message).boxed();
 			self.outbound = Some(ProtocolState::Sending(stream));
 		} else {
@@ -159,20 +155,20 @@ impl ProtocolsHandler for Handler {
 		}
 	}
 
-	fn inject_event(&mut self, message: Message) {
+	fn inject_event(&mut self, message: Packet) {
 		// Send an outbound message.
 		match self.outbound.take() {
 			Some(ProtocolState::Idle(stream)) => {
-				let Message(message) = message;
+				let Packet(message) = message;
 				let stream = protocol::send_message(stream, message).boxed();
 				self.outbound = Some(ProtocolState::Sending(stream));
 			},
 			Some(ProtocolState::OpenStream) => {
 				self.outbound = Some(ProtocolState::OpenStream);
-				if self.pending_message.is_some() {
+				if self.pending_packet.is_some() {
 					log::warn!(target: "mixnet", "Dropped message, opening stream");
 				} else {
-					self.pending_message = Some(message);
+					self.pending_packet = Some(message);
 				}
 			},
 			Some(ProtocolState::Sending(stream)) => {
@@ -180,26 +176,24 @@ impl ProtocolsHandler for Handler {
 				log::warn!(target: "mixnet", "Dropped message, already sending");
 			},
 			None =>
-				if self.pending_message.is_some() {
+				if self.pending_packet.is_some() {
 					log::warn!(target: "mixnet", "Dropped message");
 				} else {
-					self.pending_message = Some(message);
+					self.pending_packet = Some(message);
 				},
 		}
 	}
 
-	fn inject_dial_upgrade_error(&mut self, _info: (), error: ProtocolsHandlerUpgrErr<Void>) {
-		self.outbound = None; // Request a new substream on the next `poll`.
-
+	fn inject_dial_upgrade_error(&mut self, _info: (), error: ConnectionHandlerUpgrErr<Void>) {
 		let error = match error {
-			ProtocolsHandlerUpgrErr::Upgrade(UpgradeError::Select(NegotiationError::Failed)) => {
+			ConnectionHandlerUpgrErr::Upgrade(UpgradeError::Select(NegotiationError::Failed)) => {
+				log::warn!(target: "mixnet", "Connection upgrade fail on dial.");
 				debug_assert_eq!(self.state, State::Active);
-
 				self.state = State::Inactive { reported: false };
 				return
 			},
 			// Note: This timeout only covers protocol negotiation.
-			ProtocolsHandlerUpgrErr::Timeout => Failure::Timeout,
+			ConnectionHandlerUpgrErr::Timeout => Failure::Timeout,
 			e => Failure::Other { error: Box::new(e) },
 		};
 
@@ -213,14 +207,14 @@ impl ProtocolsHandler for Handler {
 	fn poll(
 		&mut self,
 		cx: &mut Context<'_>,
-	) -> Poll<ProtocolsHandlerEvent<protocol::Mixnet, (), crate::network::Result, Self::Error>> {
+	) -> Poll<ConnectionHandlerEvent<protocol::Mixnet, (), crate::network::Result, Self::Error>> {
 		match self.state {
 			State::Inactive { reported: true } => {
 				return Poll::Pending // nothing to do on this connection
 			},
 			State::Inactive { reported: false } => {
 				self.state = State::Inactive { reported: true };
-				return Poll::Ready(ProtocolsHandlerEvent::Custom(Err(Failure::Unsupported)))
+				return Poll::Ready(ConnectionHandlerEvent::Custom(Err(Failure::Unsupported)))
 			},
 			State::Active => {},
 		}
@@ -236,7 +230,12 @@ impl ProtocolsHandler for Handler {
 				Poll::Ready(Ok((stream, msg))) => {
 					// An inbound message.
 					self.inbound = Some(protocol::recv_message(stream).boxed());
-					return Poll::Ready(ProtocolsHandlerEvent::Custom(Ok(Message(msg))))
+					return Poll::Ready(ConnectionHandlerEvent::Custom(
+						match Packet::from_vec(msg) {
+							Ok(packet) => Ok(packet),
+							Err(e) => Err(Failure::Other { error: Box::new(crate::core::Error::SphinxError(e)) }),
+						},
+					))
 				},
 			}
 		}
@@ -245,7 +244,7 @@ impl ProtocolsHandler for Handler {
 			// Check for outbound failures.
 			if let Some(error) = self.pending_errors.pop_back() {
 				log::debug!(target: "mixnet", "Protocol failure: {:?}", error);
-				return Poll::Ready(ProtocolsHandlerEvent::Close(error))
+				return Poll::Ready(ConnectionHandlerEvent::Close(error))
 			}
 
 			// Continue outbound messages.
@@ -275,7 +274,9 @@ impl ProtocolsHandler for Handler {
 					self.outbound = Some(ProtocolState::OpenStream);
 					let protocol = SubstreamProtocol::new(protocol::Mixnet, ())
 						.with_timeout(self.config.connection_timeout);
-					return Poll::Ready(ProtocolsHandlerEvent::OutboundSubstreamRequest { protocol })
+					return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
+						protocol,
+					})
 				},
 			}
 		}
