@@ -32,8 +32,8 @@ pub use crate::core::{
 	sphinx::{hash, SprpKey, SurbsPayload, SurbsPersistance, PAYLOAD_TAG_SIZE},
 };
 use crate::{
-	core::connection::{ConnectionResult, ConnectionStats, ManagedConnection},
-	traits::{Configuration, Connection, NewRoutingSet, ShouldConnectTo},
+	core::connection::{ConnectionStats, ManagedConnection},
+	traits::{Configuration, NewRoutingSet, ShouldConnectTo},
 	DecodedMessage, MessageType, MixnetId, NetworkId, SendOptions,
 };
 pub use config::Config;
@@ -463,10 +463,7 @@ impl Mixnet {
 		self.topology.peer_stats(&self.peer_counts);
 	}
 
-	pub fn insert_connection(
-		&mut self,
-		network_id: NetworkId,
-	) {
+	pub fn insert_connection(&mut self, network_id: NetworkId) {
 		if let Some(peer_id) = self.remove_connected_peer(&network_id) {
 			log::warn!(target: "mixnet", "Removing old connection with {:?}, on handshake restart", peer_id);
 		}
@@ -489,13 +486,10 @@ impl Mixnet {
 		self.topology.peer_stats(&self.peer_counts);
 	}
 
-	pub fn has_connection(
-		&self,
-		network_id: &NetworkId,
-	) -> bool {
+	pub fn has_connection(&self, network_id: &NetworkId) -> bool {
 		self.connected_peers_index.contains_key(network_id)
 	}
-	
+
 	pub fn local_id(&self) -> &MixnetId {
 		&self.local_id
 	}
@@ -965,8 +959,6 @@ impl Mixnet {
 				}
 
 				// shuffle every window
-				use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
-				let mut rng = SmallRng::from_entropy();
 			}
 
 			let duration = now - self.window.current_start;

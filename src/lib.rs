@@ -22,7 +22,6 @@ mod core;
 mod network;
 pub mod traits;
 
-pub(crate) use crate::core::connection::{EXTERNAL_QUERY_SIZE_WITH_SURB, EXTERNAL_REPLY_SIZE};
 pub use crate::{
 	core::{
 		connection::ConnectionStats, generate_new_keys, public_from_ed25519, secret_from_ed25519,

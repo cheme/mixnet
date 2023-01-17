@@ -23,7 +23,7 @@
 
 use crate::{
 	traits::{NewRoutingSet, ShouldConnectTo, Topology},
-	Error, MixPublicKey, MixnetId, PeerCount, NetworkId,
+	Error, MixPublicKey, MixnetId, NetworkId, PeerCount,
 };
 use log::{debug, error, trace};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

@@ -24,42 +24,19 @@
 //! of packet.
 
 use crate::{
-	core::{
-		ConnectedKind, PacketType, QueuedPacket, ReplayTag, WindowInfo, FRAGMENT_PACKET_SIZE,
-		PAYLOAD_TAG_SIZE, WINDOW_MARGIN_PERCENT,
-	},
-	traits::{Configuration, Connection, Topology},
-	MixPublicKey, MixnetId, NetworkId, Packet, PeerCount, PACKET_SIZE,
+	core::{ConnectedKind, PacketType, QueuedPacket, WindowInfo, WINDOW_MARGIN_PERCENT},
+	traits::Configuration,
+	MixPublicKey, MixnetId, NetworkId, Packet, PeerCount,
 };
-use futures::FutureExt;
 use futures_timer::Delay;
 use std::{
 	collections::{BinaryHeap, VecDeque},
 	num::Wrapping,
-	task::{Context, Poll},
+	task::Poll,
 	time::{Duration, Instant},
 };
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_METAPAQUET_QUEUE: usize = 1_000;
-pub(crate) const EXTERNAL_QUERY_SIZE: usize = PACKET_SIZE + std::mem::size_of::<MixnetId>();
-pub(crate) const EXTERNAL_QUERY_SIZE_WITH_SURB: usize =
-	std::mem::size_of::<ReplayTag>() + EXTERNAL_QUERY_SIZE;
-pub(crate) const EXTERNAL_REPLY_SIZE: usize =
-	std::mem::size_of::<ReplayTag>() + PAYLOAD_TAG_SIZE + FRAGMENT_PACKET_SIZE;
-
-macro_rules! try_poll {
-	( $call: expr ) => {
-		match $call {
-			Poll::Ready(Ok(result)) => Some(result),
-			Poll::Ready(Err(e)) => {
-				log::debug!(target: "mixnet", "Error in poll {:?}", e);
-				return Poll::Ready(Err(()));
-			},
-			Poll::Pending => None,
-		}
-	}
-}
 
 /// Events sent from a polled connection to the main mixnet loop.
 pub(crate) enum ConnectionResult {

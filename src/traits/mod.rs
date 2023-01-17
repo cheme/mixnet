@@ -24,8 +24,6 @@ pub mod hash_table;
 
 use crate::{Error, MixPublicKey, MixnetId, NetworkId, PeerCount, WindowStats};
 use ambassador::delegatable_trait;
-use dyn_clone::DynClone;
-use futures::{channel::mpsc::SendError, Sink};
 use std::{
 	collections::BTreeSet,
 	marker::Unpin,
@@ -290,7 +288,6 @@ impl Topology for NoTopology {
 	}
 
 	fn handle_new_routing_set(&mut self, _set: NewRoutingSet) {}
-
 
 	fn get_mixnet_id(&self, network_id: &NetworkId) -> Option<MixnetId> {
 		None

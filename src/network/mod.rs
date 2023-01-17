@@ -25,19 +25,19 @@ mod handler;
 mod protocol;
 
 use crate::{
-	core::{Config, Mixnet, MixnetEvent, Packet, SurbsPayload, PUBLIC_KEY_LEN},
+	core::{Config, Mixnet, MixnetEvent, Packet},
 	traits::Configuration,
-	MixPublicKey, MixnetId, MixnetToBehaviorEvent, NetworkId, SendOptions, DecodedMessage,
+	DecodedMessage, MixPublicKey, NetworkId,
 };
 use futures::FutureExt;
 use futures_timer::Delay;
 use handler::{Failure, Handler};
 use libp2p_core::{connection::ConnectionId, ConnectedPoint, Multiaddr, PeerId};
 use libp2p_swarm::{
-	IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, PollParameters,
+	IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
 };
 use std::{
-	collections::{HashMap, VecDeque},
+	collections::VecDeque,
 	task::{Context, Poll},
 	time::Duration,
 };
@@ -98,7 +98,9 @@ impl NetworkBehaviour for MixnetBehaviour {
 		match event {
 			Ok(packet) => {
 				log::trace!(target: "mixnet", "Incoming message from {:?}", peer_id);
-				if let Ok(Some(((message, kind), peer))) = self.mixnet.import_message(peer_id, packet) {
+				if let Ok(Some(((message, kind), peer))) =
+					self.mixnet.import_message(peer_id, packet)
+				{
 					self.events.push_front(MixnetEvent::Message(DecodedMessage {
 						peer,
 						message,

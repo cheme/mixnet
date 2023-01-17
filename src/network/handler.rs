@@ -233,7 +233,9 @@ impl ConnectionHandler for Handler {
 					return Poll::Ready(ConnectionHandlerEvent::Custom(
 						match Packet::from_vec(msg) {
 							Ok(packet) => Ok(packet),
-							Err(e) => Err(Failure::Other { error: Box::new(crate::core::Error::SphinxError(e)) }),
+							Err(e) => Err(Failure::Other {
+								error: Box::new(crate::core::Error::SphinxError(e)),
+							}),
 						},
 					))
 				},
