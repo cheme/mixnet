@@ -46,7 +46,7 @@ pub(crate) enum Command {
 	AddPeer(NetworkId, Option<NegotiatedSubstream>, NegotiatedSubstream, OneShotSender<()>),
 	AddPeerInbound(NetworkId, NegotiatedSubstream),
 	RemoveConnectedPeer(NetworkId),
-	NewGlobalRoutingSet(Vec<(MixnetId, MixPublicKey)>),
+	NewGlobalRoutingSet(Vec<(MixnetId, MixPublicKey, NetworkId)>),
 }
 
 impl Command {
@@ -96,7 +96,7 @@ impl<T: Configuration> MixnetWorker<T> {
 			}
 
 			if let Poll::Ready(event) = self.worker_in.poll_next_unpin(cx) {
-				if !self.on_command(cx, event) {
+				if !self.on_command(event) {
 					return Poll::Ready(MixnetEvent::Shutdown)
 				}
 			}
@@ -110,7 +110,7 @@ impl<T: Configuration> MixnetWorker<T> {
 		}
 	}
 
-	fn on_command(&mut self, cx: &Context, result: Option<WorkerCommand>) -> bool {
+	fn on_command(&mut self, result: Option<WorkerCommand>) -> bool {
 		match result {
 			Some(message) => match message.0 {
 				Command::RegisterMessage(peer_id, message, send_options) => {
@@ -140,7 +140,7 @@ impl<T: Configuration> MixnetWorker<T> {
 						log::warn!(target: "mixnet", "Replacing an existing connection for {:?}", peer);
 					}
 					let con = Connection::new(close_handler, inbound, outbound);
-					self.mixnet.insert_connection(cx.waker().clone(), peer, con);
+					self.mixnet.insert_connection(peer, con);
 					true
 				},
 				Command::AddPeerInbound(peer, inbound) => {

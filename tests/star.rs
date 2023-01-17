@@ -38,7 +38,7 @@ use std::{
 use ambassador::Delegate;
 use mixnet::{
 	ambassador_impl_Topology,
-	traits::{NewRoutingSet, ShouldConnectTo, Topology},
+	traits::{NewRoutingSet, Topology},
 	Error, MixPublicKey, MixSecretKey, MixnetId, NetworkId, PeerCount,
 };
 
@@ -52,7 +52,8 @@ struct ConfigGraph {
 #[derive(Clone)]
 struct TopologyGraph {
 	connections: HashMap<MixnetId, Vec<(MixnetId, MixPublicKey)>>,
-	peers: Vec<(MixnetId, MixPublicKey)>,
+	networking: HashMap<NetworkId, MixnetId>,
+	peers: Vec<(MixnetId, MixPublicKey, NetworkId)>,
 	// allow single external
 	external: Option<MixnetId>,
 	nb_connected: Arc<AtomicUsize>,
@@ -61,14 +62,16 @@ struct TopologyGraph {
 }
 
 impl TopologyGraph {
-	fn new_star(nodes: &[(MixnetId, MixPublicKey)]) -> Self {
+	fn new_star(nodes: &[(MixnetId, MixPublicKey, NetworkId)]) -> Self {
 		let mut connections = HashMap::new();
+		let mut networking = HashMap::new();
 		for i in 0..nodes.len() {
-			let (node, _node_key) = nodes[i];
+			let (node, _node_key, network_id) = nodes[i];
+			networking.insert(network_id, node);
 			let mut neighbors = Vec::new();
 			for (j, node) in nodes.iter().enumerate() {
 				if i != j {
-					neighbors.push(*node)
+					neighbors.push((node.0, node.1))
 				}
 			}
 			connections.insert(node, neighbors);
@@ -76,6 +79,7 @@ impl TopologyGraph {
 
 		Self {
 			connections,
+			networking,
 			peers: nodes.iter().map(Clone::clone).collect(),
 			external: Default::default(),
 			nb_connected: Arc::new(0.into()),
@@ -115,10 +119,6 @@ impl Topology for TopologyGraph {
 		None
 	}
 
-	fn try_connect(&mut self) -> Option<BTreeSet<MixnetId>> {
-		None
-	}
-
 	fn can_route(&self, id: &MixnetId) -> bool {
 		self.connections.contains_key(id)
 	}
@@ -130,7 +130,7 @@ impl Topology for TopologyGraph {
 		_num_hop: usize,
 	) -> Vec<(MixnetId, MixPublicKey)> {
 		// allow only with peer 0
-		vec![self.peers[0]]
+		vec![(self.peers[0].0, self.peers[0].1)]
 	}
 
 	fn random_path(
@@ -151,9 +151,9 @@ impl Topology for TopologyGraph {
 		} else {
 			self.peers
 				.iter()
-				.filter(|(k, _v)| k != start_node.0)
+				.filter(|(k, _v, _n)| k != start_node.0)
 				.choose(&mut rand::thread_rng())
-				.map(|(k, _)| *k)
+				.map(|(k, _, _)| *k)
 				.ok_or(Error::NoPath(None))?
 		};
 		// Generate all possible paths and select one at random
@@ -204,13 +204,12 @@ impl Topology for TopologyGraph {
 		self.local_id.is_some()
 	}
 
-	fn should_connect_to(&self) -> ShouldConnectTo {
-		// no reco hanling in these tests
-		ShouldConnectTo::empty()
-	}
-
 	fn handle_new_routing_set(&mut self, _set: NewRoutingSet) {
 		// static set in these tests
+	}
+
+	fn get_mixnet_id(&self, network_id: &NetworkId) -> Option<MixnetId> {
+		self.networking.get(network_id).cloned()
 	}
 }
 
@@ -262,7 +261,6 @@ fn test_messages(conf: TestConfig) {
 		surb_ttl_ms: 100_000,
 		window_size_ms: 2_000,
 		graceful_topology_change_period_ms: 0,
-		keep_handshaken_disconnected_address: true,
 		queue_message_unconnected_ms: 0,
 		queue_message_unconnected_number: 0,
 		receive_margin_ms: None,
@@ -279,7 +277,7 @@ fn test_messages(conf: TestConfig) {
 
 	let make_topo = move |p: usize,
 	                      network_id: PeerId,
-	                      nodes: &[(MixnetId, MixPublicKey)],
+	                      nodes: &[(MixnetId, MixPublicKey, NetworkId)],
 	                      secrets: &[(MixSecretKey, ed25519_zebra::SigningKey)],
 	                      config: &mixnet::Config| {
 		let mut topo = TopologyGraph::new_star(&nodes[..num_peers]);

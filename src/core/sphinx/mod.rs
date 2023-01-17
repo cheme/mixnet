@@ -154,7 +154,6 @@ pub enum Unwrapped {
 	Payload(Vec<u8>),
 	SurbsQuery(Vec<u8>, Vec<u8>),
 	SurbsReply(Vec<u8>, Option<Vec<u8>>, Box<(crate::MixnetId, crate::MixPublicKey)>),
-	SurbsReplyExternal(crate::MixnetId, ReplayTag, Vec<u8>),
 }
 
 enum DoNextHop {
@@ -168,17 +167,6 @@ pub struct SurbsPersistance {
 	pub keys: Vec<SprpKey>,
 	pub query: Option<Vec<u8>>,
 	pub recipient: (crate::MixnetId, crate::MixPublicKey),
-}
-
-pub enum SurbsPersistances {
-	Local(SurbsPersistance),
-	FromExternal(crate::MixnetId, ReplayTag),
-}
-
-impl From<SurbsPersistance> for SurbsPersistances {
-	fn from(surb: SurbsPersistance) -> Self {
-		SurbsPersistances::Local(surb)
-	}
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Copy)]
@@ -522,7 +510,7 @@ pub fn read_surb_payload(
 ) -> Result<Unwrapped, Error> {
 	// Split into mutable references and validate the AD
 	match surb.pending.remove(replay_tag) {
-		Some(SurbsPersistances::Local(surb)) => {
+		Some(surb) => {
 			//
 			let mut decrypted_payload = payload;
 			let nb_key = surb.keys.len();
@@ -539,9 +527,6 @@ pub fn read_surb_payload(
 			let _ = decrypted_payload.drain(..PAYLOAD_TAG_SIZE);
 			Ok(Unwrapped::SurbsReply(decrypted_payload, surb.query, Box::new(surb.recipient)))
 		},
-
-		Some(SurbsPersistances::FromExternal(external_peer, tag)) =>
-			Ok(Unwrapped::SurbsReplyExternal(external_peer, tag, payload.to_vec())),
 		None => {
 			log::trace!(target: "mixnet", "Surbs reply received after timeout {:?}", &replay_tag);
 			Err(Error::MissingSurbs)

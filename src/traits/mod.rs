@@ -92,57 +92,6 @@ pub trait Topology: Sized {
 		num_hops: usize,
 	) -> Result<Vec<Vec<(MixnetId, MixPublicKey)>>, Error>;
 
-	/// Variant of random path where first external
-	/// node or recipient can be calculated in relation
-	/// with random_path logic.
-	///
-	/// If `from` is undefined, we select a first node (external).
-	/// If `recipient` is undefined a random destination is selected.
-	/// If path is for surb, `last_query_if_surb` defines the query path.
-	///
-	/// recipient is part of the returned path, not the origin.
-	/// If new origin is calculated, return attached to the result.
-	/// If new recipient is calculated, it is the last peer in the path.
-	fn random_path_ext(
-		&mut self,
-		local_id: &MixnetId,
-		from: Option<(&MixnetId, Option<&MixPublicKey>)>,
-		recipient: Option<(&MixnetId, Option<&MixPublicKey>)>,
-		count: usize,
-		num_hops: usize,
-	) -> Result<(Option<MixnetId>, Vec<Vec<(MixnetId, MixPublicKey)>>), Error> {
-		if let Some(start) = from {
-			self.random_path(start, recipient, count, num_hops).map(|r| (None, r))
-		} else {
-			let firsts =
-				self.first_hop_nodes_external(local_id, recipient.as_ref().map(|r| r.0), num_hops);
-			if firsts.is_empty() {
-				return Err(Error::NoPath(recipient.map(|r| r.0.clone())))
-			}
-			let mut rng = rand::thread_rng();
-			use rand::Rng;
-			let n_start: usize = rng.gen_range(0..firsts.len());
-			let mut n: usize = n_start;
-			loop {
-				let first = &firsts[n];
-				let start = (&first.0, Some(&first.1));
-
-				match self.random_path(start, recipient, count, num_hops) {
-					Ok(path) => return Ok((Some(first.0), path)),
-					Err(e) => {
-						n += 1;
-						if n == firsts.len() {
-							n = 0
-						}
-						if n == n_start {
-							return Err(e)
-						}
-					},
-				}
-			}
-		}
-	}
-
 	/// On connection successful handshake.
 	/// TODO could pass connectionkind to simplify code
 	fn connected(&mut self, id: MixnetId, public_key: MixPublicKey);
@@ -156,43 +105,21 @@ pub trait Topology: Sized {
 	/// be costless when no change occurs.
 	fn changed_route(&mut self) -> Option<BTreeSet<MixnetId>>;
 
-	/// On topology change, might have new peer to accept.
-	/// Call to this function return the new peers only once and should
-	/// be costless when no change occurs.
-	/// TODO relying on should connect should be enough, but something broke
-	/// on session change test.
-	fn try_connect(&mut self) -> Option<BTreeSet<MixnetId>>;
-
-	/// Return all possible connection ordered by priority and the targetted number of connections
-	/// to use.
-	fn should_connect_to(&self) -> ShouldConnectTo;
-
 	/// Is peer allowed to connect to our node.
 	fn accept_peer(&self, peer_id: &MixnetId, peers: &PeerCount) -> bool;
 
 	/// A new static routing set was globally defined.
 	fn handle_new_routing_set(&mut self, set: NewRoutingSet);
 
+	/// Obtain a mixnet id from a network id if in topology.
+	fn get_mixnet_id(&self, network_id: &NetworkId) -> Option<MixnetId>;
 	// TODO handle new id and key.
-}
-
-/// Connection expected from current topology.
-pub struct ShouldConnectTo<'a> {
-	pub peers: &'a [MixnetId],
-	pub number: usize,
-	pub is_static: bool,
-}
-
-impl<'a> ShouldConnectTo<'a> {
-	pub fn empty() -> ShouldConnectTo<'static> {
-		ShouldConnectTo { peers: &[], number: 0, is_static: true }
-	}
 }
 
 /// A current routing set of peers.
 /// Two variant given other info will be shared.
 pub struct NewRoutingSet<'a> {
-	pub peers: &'a [(MixnetId, MixPublicKey)],
+	pub peers: &'a [(MixnetId, MixPublicKey, NetworkId)],
 }
 
 /// Handshake on peer connection.
@@ -283,15 +210,11 @@ impl Topology for NoTopology {
 		None
 	}
 
-	fn try_connect(&mut self) -> Option<BTreeSet<MixnetId>> {
+	fn handle_new_routing_set(&mut self, _set: NewRoutingSet) {}
+
+	fn get_mixnet_id(&self, _network_id: &NetworkId) -> Option<MixnetId> {
 		None
 	}
-
-	fn should_connect_to(&self) -> ShouldConnectTo {
-		ShouldConnectTo::empty()
-	}
-
-	fn handle_new_routing_set(&mut self, _set: NewRoutingSet) {}
 }
 
 impl Configuration for NoTopology {
@@ -339,7 +262,6 @@ pub trait Connection: Unpin {
 	/// Return Error if connection broke.
 	fn send_flushed(&mut self, cx: &mut Context) -> Poll<Result<bool, ()>>;
 
-	/// Try receive a packet of a given size.
-	/// Maximum supported size is `PACKET_SIZE`, return error otherwise.
-	fn try_recv(&mut self, cx: &mut Context, size: usize) -> Poll<Result<Option<Vec<u8>>, ()>>;
+	/// Try receive a packet, size is always `PACKET_SIZE`.
+	fn try_recv(&mut self, cx: &mut Context) -> Poll<Result<Option<Vec<u8>>, ()>>;
 }

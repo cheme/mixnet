@@ -37,7 +37,7 @@ use mixnet::{
 	ambassador_impl_Topology,
 	traits::{
 		hash_table::{RoutingTable, TableVersion},
-		Configuration, NewRoutingSet, ShouldConnectTo, Topology,
+		Configuration, NewRoutingSet, Topology,
 	},
 	Config, Error, MixPublicKey, MixSecretKey, MixnetBehaviour, MixnetCommandSink, MixnetEvent,
 	MixnetId, MixnetWorker, PeerCount, SendOptions, SinkToWorker, StreamFromWorker, WorkerChannels,
@@ -65,7 +65,8 @@ pub enum SwarmMessage {
 }
 
 pub type TestChannels = (mpsc::Receiver<PeerTestReply>, MixnetCommandSink);
-pub type Worker<T> = (MixnetWorker<T>, mpsc::Sender<WorkerCommand>, mpsc::Sender<SwarmMessage>);
+pub type Worker<T> =
+	(MixnetWorker<T>, NetworkId, mpsc::Sender<WorkerCommand>, mpsc::Sender<SwarmMessage>);
 
 #[macro_export]
 macro_rules! log_unwrap {
@@ -184,7 +185,7 @@ pub fn mk_workers<T: Configuration>(
 	mut make_topo: impl FnMut(
 		usize,
 		NetworkId,
-		&[(MixnetId, MixPublicKey)],
+		&[(MixnetId, MixPublicKey, NetworkId)],
 		&[(MixSecretKey, ed25519_zebra::SigningKey)],
 		&Config,
 	) -> T,
@@ -193,14 +194,14 @@ pub fn mk_workers<T: Configuration>(
 
 	let mut nodes = Vec::new();
 	let mut secrets = Vec::new();
-	for _ in handles.iter() {
+	for (network_id, _, _, _) in handles.iter() {
 		let (peer_public_key, peer_secret_key) = mixnet::generate_new_keys();
 		let mut secret_mix = [0u8; 32];
 		rng.fill_bytes(&mut secret_mix);
 		let mix_secret_key: ed25519_zebra::SigningKey = secret_mix.into();
 		let mix_public_key: ed25519_zebra::VerificationKey = (&mix_secret_key).into();
 		let mix_id: [u8; 32] = mix_public_key.into();
-		nodes.push((mix_id, peer_public_key));
+		nodes.push((mix_id, peer_public_key, *network_id));
 		secrets.push((peer_secret_key, mix_secret_key));
 	}
 
@@ -209,7 +210,7 @@ pub fn mk_workers<T: Configuration>(
 	for (i, (network_id, (from_worker_sink, to_worker_stream), to_worker, to_swarm)) in
 		handles.into_iter().enumerate()
 	{
-		let (id, pub_key) = nodes[i];
+		let (id, pub_key, network_id) = nodes[i];
 		let cfg = mixnet::Config {
 			secret_key: secrets[i].0.clone(),
 			public_key: pub_key,
@@ -221,6 +222,7 @@ pub fn mk_workers<T: Configuration>(
 
 		workers.push((
 			mixnet::MixnetWorker::new(cfg, topo, (from_worker_sink, to_worker_stream)),
+			network_id,
 			to_worker,
 			to_swarm,
 		));
@@ -238,7 +240,7 @@ pub fn spawn_swarms<T: Configuration>(
 	make_topo: impl FnMut(
 		usize,
 		NetworkId,
-		&[(MixnetId, MixPublicKey)],
+		&[(MixnetId, MixPublicKey, NetworkId)],
 		&[(MixSecretKey, ed25519_zebra::SigningKey)],
 		&Config,
 	) -> T,
@@ -396,7 +398,7 @@ pub fn spawn_workers<T: Configuration>(
 	let mut test_channels = Vec::with_capacity(workers.len());
 	let mut workers_futures = Vec::with_capacity(workers.len());
 
-	for (p, (mut worker, to_worker, mut to_swarm)) in workers.into_iter().enumerate() {
+	for (p, (mut worker, network_id, to_worker, mut to_swarm)) in workers.into_iter().enumerate() {
 		let external_1 = from_external && p == num_peers;
 		let external_2 = from_external && p > num_peers;
 		let mut target_peers = if from_external && p == 0 {
@@ -435,12 +437,7 @@ pub fn spawn_workers<T: Configuration>(
 					}
 				},
 				Poll::Ready(MixnetEvent::Disconnected(disconnected)) => {
-					for (network_id, mix_id, try_reco) in disconnected {
-						if try_reco {
-							to_swarm
-								.start_send_unpin(SwarmMessage::Dial(mix_id, Some(network_id)))
-								.unwrap();
-						}
+					for (network_id, mix_id) in disconnected {
 						// when keep_connection_alive is true TODO factor the decrease and
 						// increase code
 						log::trace!(target: "mixnet_test", "{} Disconnected  {}/{:?}", p, handshake_done.len(), target_peers);
@@ -460,12 +457,6 @@ pub fn spawn_workers<T: Configuration>(
 						}
 					}
 				},
-				Poll::Ready(MixnetEvent::TryConnect(try_connect)) =>
-					for (mix_id, network_id) in try_connect {
-						to_swarm
-							.start_send_unpin(SwarmMessage::Dial(Some(mix_id), network_id))
-							.unwrap();
-					},
 				Poll::Ready(MixnetEvent::Message(message)) => {
 					log_unwrap!(
 						from_swarm_sink.start_send_unpin(PeerTestReply::ReceiveMessage(message))
@@ -632,7 +623,10 @@ pub fn send_messages(
 	}
 }
 
-pub fn new_routing_set(set: &[(MixnetId, MixPublicKey)], with_swarm_channels: &mut [TestChannels]) {
+pub fn new_routing_set(
+	set: &[(MixnetId, MixPublicKey, NetworkId)],
+	with_swarm_channels: &mut [TestChannels],
+) {
 	for channel in with_swarm_channels.iter_mut() {
 		log_unwrap!(channel.1.new_global_routing_set(set.to_vec()));
 	}

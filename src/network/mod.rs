@@ -118,7 +118,7 @@ impl MixnetCommandSink {
 	/// Change of allowed peers to route in the mixnet.
 	pub fn new_global_routing_set(
 		&mut self,
-		set: Vec<(MixnetId, MixPublicKey)>,
+		set: Vec<(MixnetId, MixPublicKey, NetworkId)>,
 	) -> std::result::Result<(), crate::Error> {
 		self.0
 			.start_send_unpin(Command::NewGlobalRoutingSet(set).into())

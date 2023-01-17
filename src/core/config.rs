@@ -63,12 +63,6 @@ pub struct Config {
 	/// Mixnet will yield if it did not for that many
 	/// consecutive poll calls.
 	pub no_yield_budget: usize,
-	/// Peer handshake connection when
-	/// dropped can persist due to multiplexing.
-	/// In this case keep peer id info to be
-	/// able to reconnect faster.
-	/// TODO a ttl
-	pub keep_handshaken_disconnected_address: bool,
 
 	/// When topology change, usually connection will
 	/// be closed and usually as many connection will
@@ -121,7 +115,6 @@ impl Config {
 			replay_ttl_ms: 100_000,
 			persist_surb_query: true,
 			no_yield_budget: DEFAULT_NO_YIELD_BUDGET,
-			keep_handshaken_disconnected_address: true,
 			graceful_topology_change_period_ms,
 			queue_message_unconnected_ms: 0,
 			queue_message_unconnected_number: 0,

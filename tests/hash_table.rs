@@ -34,7 +34,7 @@ use mixnet::{
 		hash_table::{
 			Configuration as TopologyConfig, Parameters, RoutingTable, TopologyHashTable,
 		},
-		NewRoutingSet, ShouldConnectTo, Topology,
+		NewRoutingSet, Topology,
 	},
 	Error, MixPublicKey, MixSecretKey, MixnetId, NetworkId, PeerCount, SendOptions,
 };
@@ -129,7 +129,6 @@ fn test_messages(conf: TestConfig) {
 		replay_ttl_ms: 100_000,
 		surb_ttl_ms: 100_000,
 		window_size_ms: 2_000,
-		keep_handshaken_disconnected_address: true,
 		receive_margin_ms: None,
 	};
 	let mut source_message = Vec::new();
@@ -143,7 +142,7 @@ fn test_messages(conf: TestConfig) {
 	let expect_all_connected = false;
 	let make_topo = move |p: usize,
 	                      network_id: PeerId,
-	                      nodes: &[(MixnetId, MixPublicKey)],
+	                      nodes: &[(MixnetId, MixPublicKey, NetworkId)],
 	                      secrets: &[(MixSecretKey, ed25519_zebra::SigningKey)],
 	                      config: &mixnet::Config| {
 		let mut topo = TopologyHashTable::new(
@@ -343,7 +342,6 @@ fn test_change_routing_set(conf: TestConfig) {
 		replay_ttl_ms: 100_000,
 		surb_ttl_ms: 100_000,
 		window_size_ms: 2_000,
-		keep_handshaken_disconnected_address: true,
 		receive_margin_ms: None,
 	};
 	let mut source_message = Vec::new();
@@ -361,7 +359,7 @@ fn test_change_routing_set(conf: TestConfig) {
 	let disp = std::sync::atomic::AtomicBool::new(true);
 	let make_topo = move |p: usize,
 	                      network_id: PeerId,
-	                      nodes: &[(MixnetId, MixPublicKey)],
+	                      nodes: &[(MixnetId, MixPublicKey, NetworkId)],
 	                      secrets: &[(MixSecretKey, ed25519_zebra::SigningKey)],
 	                      config: &mixnet::Config| {
 		if disp.swap(false, std::sync::atomic::Ordering::Relaxed) {
@@ -399,7 +397,7 @@ fn test_change_routing_set(conf: TestConfig) {
 
 	let nodes_ids: Vec<_> = handles
 		.iter()
-		.map(|worker| (*worker.0.mixnet().local_id(), *worker.0.mixnet().public_key()))
+		.map(|worker| (*worker.0.mixnet().local_id(), *worker.0.mixnet().public_key(), worker.1))
 		.collect();
 
 	let (nodes, mut with_swarm_channels) = common::spawn_workers::<NotDistributed>(

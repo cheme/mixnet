@@ -22,8 +22,8 @@
 //! by hashing peers id (so randomly distributed).
 
 use crate::{
-	traits::{NewRoutingSet, ShouldConnectTo, Topology},
-	Error, MixPublicKey, MixnetId, PeerCount,
+	traits::{NewRoutingSet, Topology},
+	Error, MixPublicKey, MixnetId, NetworkId, PeerCount,
 };
 use log::{debug, error, trace};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -114,11 +114,11 @@ pub struct TopologyHashTable<C: Configuration> {
 	// TODO this do not need to be stored
 	layered_routing_set_ix: HashMap<MixnetId, u8>,
 
-	try_connect: BTreeSet<MixnetId>,
-
 	// This is only routing peers we got info for.
 	// Can be redundant with `routing_set`.
 	routing_peers: BTreeMap<MixnetId, RoutingTable>,
+
+	routing_peers_network: BTreeMap<NetworkId, MixnetId>,
 
 	params: Parameters,
 
@@ -152,10 +152,6 @@ pub struct RoutingTable {
 impl<C: Configuration> Topology for TopologyHashTable<C> {
 	fn changed_route(&mut self) -> Option<BTreeSet<MixnetId>> {
 		(!self.changed_routing.is_empty()).then(|| std::mem::take(&mut self.changed_routing))
-	}
-
-	fn try_connect(&mut self) -> Option<BTreeSet<MixnetId>> {
-		(!self.try_connect.is_empty()).then(|| std::mem::take(&mut self.try_connect))
 	}
 
 	fn first_hop_nodes_external(
@@ -281,18 +277,13 @@ impl<C: Configuration> Topology for TopologyHashTable<C> {
 		}
 	}
 
-	fn should_connect_to(&self) -> ShouldConnectTo {
-		let (number, is_static) = if self.routing {
-			(C::NUMBER_CONNECTED_FORWARD, true)
-		} else {
-			(self.params.number_consumer_connection.unwrap_or(usize::MAX), false)
-		};
-		ShouldConnectTo { peers: self.should_connect_to.as_slice(), number, is_static }
-	}
-
 	fn handle_new_routing_set(&mut self, set: NewRoutingSet) {
 		self.handle_new_routing_set_start(set.peers.iter().map(|k| &k.0), None);
 		self.refresh_static_routing_tables(set.peers);
+	}
+
+	fn get_mixnet_id(&self, network_id: &NetworkId) -> Option<MixnetId> {
+		self.routing_peers_network.get(network_id).cloned()
 	}
 }
 
@@ -308,11 +299,11 @@ impl<C: Configuration> TopologyHashTable<C> {
 			local_id,
 			local_layer_ix: 0,
 			routing_set: BTreeSet::new(),
+			routing_peers_network: BTreeMap::new(),
 			layered_routing_set: Vec::new(),
 			layered_routing_set_ix: HashMap::new(),
 			connected_nodes: HashSet::new(),
 			changed_routing: BTreeSet::new(),
-			try_connect: BTreeSet::new(),
 			routing: false,
 			routing_peers: BTreeMap::new(),
 			routing_table,
@@ -459,8 +450,10 @@ impl<C: Configuration> TopologyHashTable<C> {
 		unimplemented!("rotate key");
 	}
 
-	fn refresh_static_routing_tables(&mut self, set: &[(MixnetId, MixPublicKey)]) {
-		for (id, public_key) in set.iter() {
+	fn refresh_static_routing_tables(&mut self, set: &[(MixnetId, MixPublicKey, NetworkId)]) {
+		self.routing_peers_network.clear();
+		for (id, public_key, network_id) in set.iter() {
+			self.routing_peers_network.insert(*network_id, *id);
 			if id == &self.local_id {
 				let routing_set = if self.layered_routing_set.is_empty() {
 					&self.routing_set
@@ -476,12 +469,6 @@ impl<C: Configuration> TopologyHashTable<C> {
 					routing_set,
 					&mut self.should_connect_to,
 				) {
-					// TODO could also add receive_from.
-					for peer_id in table.connected_to.iter() {
-						if !self.routing_table.connected_to.contains(peer_id) {
-							self.try_connect.insert(*peer_id);
-						}
-					}
 					self.routing_table = table;
 					self.paths.clear();
 					self.paths_depth = 0;

@@ -29,11 +29,11 @@ mod sphinx;
 use self::{fragment::MessageCollection, sphinx::Unwrapped};
 pub use crate::core::{
 	fragment::FRAGMENT_PACKET_SIZE,
-	sphinx::{hash, SprpKey, SurbsPayload, SurbsPersistance, SurbsPersistances, PAYLOAD_TAG_SIZE},
+	sphinx::{hash, SprpKey, SurbsPayload, SurbsPersistance, PAYLOAD_TAG_SIZE},
 };
 use crate::{
 	core::connection::{ConnectionResult, ConnectionStats, ManagedConnection},
-	traits::{Configuration, Connection, NewRoutingSet, ShouldConnectTo},
+	traits::{Configuration, Connection, NewRoutingSet},
 	DecodedMessage, MessageType, MixnetId, NetworkId, SendOptions,
 };
 pub use config::Config;
@@ -60,14 +60,6 @@ pub type MixSecretKey = sphinx::StaticSecret;
 /// Length of `MixPublicKey`
 pub const PUBLIC_KEY_LEN: usize = 32;
 
-/// Try reconnect, warning is rounded to window size.
-/// TODO in conf
-pub const TRY_RECONNECT_MS: usize = 5_000;
-
-/// Attempt reconnect every nb attempt to try reconnect.
-/// This apply twice less for peer above a given threshold.
-pub const TRY_RECONNECT_DYN_NB: usize = 3;
-
 /// Size of a mixnet packet.
 pub const PACKET_SIZE: usize = sphinx::OVERHEAD_SIZE + fragment::FRAGMENT_PACKET_SIZE;
 
@@ -82,15 +74,6 @@ pub struct TransmitInfo {
 /// Status of the connection with a given peer.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 enum ConnectedKind {
-	// Connection start by a configurable handshake.
-	// For external node it can be simply to check
-	// we allow external data (or to keep connection
-	// for a while until we believe our topology is correct).
-	// For node already identified as part of mixnet
-	// it can be a way to give info faster (eg key is
-	// known from topology but we did not know the connected
-	// peer own the key).
-	PendingHandshake,
 	// We and connected peer are part of mixnet topology,
 	// a constant bandwidth from us to the peer is needed.
 	RoutingForward,
@@ -100,15 +83,9 @@ enum ConnectedKind {
 	// We and connected peer are part of mixnet topology,
 	// a constant bandwidth from in both direction is needed.
 	RoutingReceiveForward,
-	// Connected node is external, we just proxy request
-	// if we are routing forward and allows it.
-	// If we are routing we may want to keep some connection
-	// to serve external request.
-	// If we are not routing the connection should really not
-	// be needed.
+	// Connected node is not routing.
 	External,
-	// Both nodes are routing, but are not connected on topology.
-	// Act as External but can be worth maintaining/caching differently.
+	// Node is routing, but unconnected to us.
 	ExternalRouting,
 	// No connection, keeping information for a later connect.
 	Disconnected,
@@ -132,18 +109,6 @@ impl ConnectedKind {
 
 	fn routing_receive(self) -> bool {
 		matches!(self, ConnectedKind::RoutingReceive | ConnectedKind::RoutingReceiveForward)
-	}
-
-	fn is_disconnected(self) -> bool {
-		matches!(self, ConnectedKind::Disconnected)
-	}
-
-	fn is_external(self) -> bool {
-		matches!(self, ConnectedKind::External | ConnectedKind::ExternalRouting)
-	}
-
-	fn is_pending_handshake(self) -> bool {
-		matches!(self, ConnectedKind::PendingHandshake)
 	}
 }
 
@@ -183,8 +148,7 @@ impl Packet {
 pub enum MixnetEvent {
 	/// A new peer has connected.
 	Connected(NetworkId, MixPublicKey),
-	Disconnected(Vec<(NetworkId, Option<MixnetId>, bool)>),
-	TryConnect(Vec<(MixnetId, Option<NetworkId>)>),
+	Disconnected(Vec<(NetworkId, Option<MixnetId>)>),
 	/// A message has reached us.
 	Message(DecodedMessage),
 	/// Shutdown signal.
@@ -283,12 +247,6 @@ impl QueuedPacket {
 	}
 }
 
-#[derive(Default)]
-struct DisconnectedPeer {
-	handshaken: Option<NetworkId>,
-	next_reconnect_attempt: usize,
-}
-
 /// Mixnet core. Mixes messages, tracks fragments and delays.
 pub struct Mixnet<T, C> {
 	pub topology: T,
@@ -301,17 +259,14 @@ pub struct Mixnet<T, C> {
 	// random polling order.
 	polling_random: Vec<Option<usize>>,
 	peer_counts: PeerCount,
-	handshaken_peers_index: HashMap<MixnetId, usize>,
-	// TODO ttl map this and clean connected somehow
-	// TODO consider removal
-	disconnected_peers: HashMap<MixnetId, DisconnectedPeer>,
+	routing_peers_index: HashMap<MixnetId, usize>,
 	// Incomplete incoming message fragments.
 	fragments: fragment::MessageCollection,
 	// Message waiting for surb.
 	surb: SurbsCollection,
 	// Received message filter.
 	replay_filter: ReplayFilter,
-	// Timer for the next poll for messages.
+	// Timer for the next message poll.
 	next_message: Delay,
 	// Average delay at which we poll for real or cover messages.
 	average_traffic_delay: Duration,
@@ -325,19 +280,9 @@ pub struct Mixnet<T, C> {
 
 	window_size: Duration,
 
-	keep_handshaken_disconnected_address: bool,
-
-	forward_unconnected_message_queue: Option<QueuedUnconnectedPackets>,
-
 	pending_events: VecDeque<MixnetEvent>,
 
-	/// try to connect to better peers or unconnected peers every N windows.
-	try_reconnect_every: usize,
-
-	/// Countdown to next attempt at finding new connections.
-	next_try_reconnect: usize,
-
-	/// If define we use internal reception buffer with limitted lenience.
+	/// If define we use internal reception buffer with limited.
 	/// We receive eagerly and if buffer limit size is exceeded, we close connection.
 	/// First window after a connection is always ignored.
 	/// TODO do not allow reconnect on close connection.
@@ -389,20 +334,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		let receive_buffer = config
 			.receive_margin_ms
 			.map(|size_ms| (size_ms * 1_000_000 / packet_duration_nanos) as usize);
-		let forward_unconnected_message_queue = (config.queue_message_unconnected_ms > 0 &&
-			config.queue_message_unconnected_number > 0)
-			.then(|| {
-				QueuedUnconnectedPackets::new(
-					config.queue_message_unconnected_ms,
-					config.queue_message_unconnected_number,
-				)
-			});
 
-		let mut try_reconnect_every = TRY_RECONNECT_MS / config.window_size_ms as usize;
-		if TRY_RECONNECT_MS % config.window_size_ms as usize > 0 {
-			try_reconnect_every += 1;
-		}
-		let next_try_reconnect = 0; // try connect on first poll.
 		Mixnet {
 			topology,
 			surb: SurbsCollection::new(&config),
@@ -417,16 +349,11 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			connected_peers_index: Default::default(),
 			polling_random: Default::default(),
 			peer_counts: Default::default(),
-			handshaken_peers_index: Default::default(),
-			disconnected_peers: Default::default(),
+			routing_peers_index: Default::default(),
 			pending_events: Default::default(),
-			forward_unconnected_message_queue,
-			keep_handshaken_disconnected_address: config.keep_handshaken_disconnected_address,
 			next_message: Delay::new(Duration::from_millis(0)),
 			average_hop_delay: Duration::from_millis(config.average_message_delay_ms as u64),
 			average_traffic_delay,
-			try_reconnect_every,
-			next_try_reconnect,
 			window_size,
 			window: WindowInfo {
 				packet_per_window,
@@ -459,7 +386,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			if let Some(mut connection) = connection {
 				self.peer_counts.remove_peer(connection.set_disconnected_kind());
 				if let Some(mix_id) = connection.mixnet_id() {
-					self.handshaken_peers_index.remove(mix_id);
+					self.routing_peers_index.remove(mix_id);
 					self.topology.disconnected(mix_id);
 				}
 			}
@@ -469,27 +396,24 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		self.topology.peer_stats(&self.peer_counts);
 	}
 
-	pub fn insert_connection(
-		&mut self,
-		waker: futures::task::Waker,
-		peer: NetworkId,
-		connection: C,
-	) {
-		if let Some(peer_id) = self.remove_connected_peer(&peer, false) {
+	pub fn insert_connection(&mut self, network_id: NetworkId, connection: C) {
+		if let Some(peer_id) = self.remove_connected_peer(&network_id, false) {
 			log::warn!(target: "mixnet", "Removing old connection with {:?}, on handshake restart", peer_id);
 		}
+		let peer_id = self.topology.get_mixnet_id(&network_id);
 		let connection = ManagedConnection::new(
-			waker,
 			self.local_id,
 			self.public,
-			peer,
+			network_id,
+			peer_id,
 			connection,
 			self.window.current,
 			self.window.stats.is_some(),
-			&mut self.peer_counts,
 			self.receive_buffer,
+			&mut self.topology,
+			&mut self.peer_counts,
 		);
-		self.connected_peers_index.insert(peer, self.connected_peers.len());
+		self.connected_peers_index.insert(network_id, self.connected_peers.len());
 		self.polling_random.push(Some(self.connected_peers.len()));
 		self.connected_peers.push(Some(connection));
 		self.topology.peer_stats(&self.peer_counts);
@@ -519,7 +443,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		kind: PacketType,
 	) -> Result<(), Error> {
 		if let Some(connection) = self
-			.handshaken_peers_index
+			.routing_peers_index
 			.get(&recipient)
 			.and_then(|ix| self.connected_peers.get_mut(*ix).and_then(Option::as_mut))
 		{
@@ -530,63 +454,6 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 				&self.topology,
 				&self.peer_counts,
 			)?;
-		} else {
-			if let Some(queue) = self.forward_unconnected_message_queue.as_mut() {
-				if kind != PacketType::Cover {
-					let deadline = self.window.last_now + delay;
-					queue.insert(
-						recipient,
-						QueuedPacket { deadline, data, kind },
-						self.window.last_now,
-					);
-					return Ok(())
-				}
-			}
-			return Err(Error::Unreachable)
-		}
-		Ok(())
-	}
-
-	// When node are not routing, the packet is not delayed
-	// and sent immediatly.
-	fn queue_external_packet(
-		&mut self,
-		recipient: MixnetId,
-		first_hop: MixnetId,
-		data: Packet,
-		kind: PacketType,
-		with_surb: Option<ReplayTag>,
-	) -> Result<(), Error> {
-		if let Some(connection) = self
-			.handshaken_peers_index
-			.get(&recipient)
-			.and_then(|ix| self.connected_peers.get_mut(*ix).and_then(Option::as_mut))
-		{
-			let deadline = self.window.last_now;
-			// TODO change this just pass data?
-			connection.queue_external_packet(
-				first_hop,
-				with_surb,
-				QueuedPacket { deadline, data, kind },
-			)?;
-		} else {
-			return Err(Error::Unreachable)
-		}
-		Ok(())
-	}
-
-	fn queue_external_reply(
-		&mut self,
-		recipient: MixnetId,
-		tag: ReplayTag,
-		data: Vec<u8>,
-	) -> Result<(), Error> {
-		if let Some(connection) = self
-			.handshaken_peers_index
-			.get(&recipient)
-			.and_then(|ix| self.connected_peers.get_mut(*ix).map(Option::as_mut).flatten())
-		{
-			connection.queue_external_reply(tag, data)?;
 		} else {
 			return Err(Error::Unreachable)
 		}
@@ -606,18 +473,16 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		self.try_apply_topology_change();
 		let mut rng = rand::thread_rng();
 
-		let is_external = !self.topology.can_route(&self.local_id);
 		let mut surb_query =
 			(self.persist_surb_query && send_options.with_surb).then(|| message.clone());
 
 		let chunks = fragment::create_fragments(&mut rng, message, send_options.with_surb)?;
-		let (first_external, paths) = self.random_paths(
+		let paths = self.random_paths(
 			peer_id.as_ref(),
 			peer_pub_key.as_ref(),
 			&send_options.num_hop,
 			chunks.len(),
-			None,
-			is_external,
+			false,
 		)?;
 
 		let mut surb = if send_options.with_surb {
@@ -628,15 +493,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 				peer_id.as_ref()
 			};
 			let paths = self
-				.random_paths(
-					peer_id,
-					peer_pub_key.as_ref(),
-					&send_options.num_hop,
-					1,
-					Some(first_external.as_ref()),
-					is_external,
-				)?
-				.1
+				.random_paths(peer_id, peer_pub_key.as_ref(), &send_options.num_hop, 1, true)?
 				.remove(0);
 			let first_node = paths[0].0;
 			let paths: Vec<_> = paths
@@ -659,46 +516,28 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			let (packet, surb_keys) =
 				sphinx::new_packet(&mut rng, hops, chunk.into_vec(), chunk_surb)
 					.map_err(Error::SphinxError)?;
-			let mut surb_tag = None;
 			if let Some(TransmitInfo { sprp_keys: keys, surb_id: Some(surb_id) }) = surb_keys {
 				let persistance = SurbsPersistance {
 					keys,
 					query: surb_query.take(),
 					recipient: *paths[n].last().unwrap(),
 				};
-				if first_external.is_some() {
-					surb_tag = Some(surb_id.clone());
-				}
 				self.surb.insert(surb_id, persistance.into(), self.window.last_now);
 			}
-			if let Some(target) = first_external {
-				packets.push((target, packet, Some((first_id, surb_tag))));
-			} else {
-				packets.push((first_id, packet, None));
-			}
+			packets.push((first_id, packet));
 		}
 
-		for (peer_id, packet, is_external) in packets {
-			if let Some((first_hop, with_surb)) = is_external {
-				self.queue_external_packet(
-					peer_id,
-					first_hop,
-					packet,
-					PacketType::SendFromSelf,
-					with_surb,
-				)?;
-			} else {
-				// TODO delay may not be useful here (since secondary
-				// queue used).
-				let delay = exp_delay(&mut rng, self.average_hop_delay);
-				self.queue_packet(peer_id, packet, delay, PacketType::SendFromSelf)?;
-			}
+		for (peer_id, packet) in packets {
+			// TODO delay may not be useful here (since secondary
+			// queue used).
+			let delay = exp_delay(&mut rng, self.average_hop_delay);
+			self.queue_packet(peer_id, packet, delay, PacketType::SendFromSelf)?;
 		}
 		Ok(())
 	}
 
 	/// Change of globably allowed peer to be in routing set.
-	pub fn new_global_routing_set(&mut self, set: &[(MixnetId, MixPublicKey)]) {
+	pub fn new_global_routing_set(&mut self, set: &[(MixnetId, MixPublicKey, NetworkId)]) {
 		self.topology.handle_new_routing_set(NewRoutingSet { peers: &set })
 	}
 
@@ -768,9 +607,6 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 					log::error!(target: "mixnet", "Surbs fragment from {:?}", peer_id);
 				}
 			},
-			Ok(Unwrapped::SurbsReplyExternal(external_peer, tag, payload)) => {
-				self.queue_external_reply(external_peer, tag, payload)?;
-			},
 			Ok(Unwrapped::SurbsQuery(encoded_surb, payload)) => {
 				debug_assert!(encoded_surb.len() == crate::core::sphinx::SURBS_REPLY_SIZE);
 				if let Some(m) = self.fragments.insert_fragment(
@@ -809,25 +645,13 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		});
 
 		if with_event {
-			self.pending_events.push_back(MixnetEvent::Disconnected(vec![(
-				*id,
-				mix_id.clone(),
-				false,
-			)]));
+			self.pending_events
+				.push_back(MixnetEvent::Disconnected(vec![(*id, mix_id.clone())]));
 		}
 
 		if let Some(mix_id) = mix_id {
-			self.handshaken_peers_index.remove(&mix_id);
+			self.routing_peers_index.remove(&mix_id);
 			self.topology.disconnected(&mix_id);
-			if self.keep_handshaken_disconnected_address {
-				self.disconnected_peers.insert(
-					mix_id,
-					DisconnectedPeer {
-						handshaken: Some(*id),
-						next_reconnect_attempt: TRY_RECONNECT_DYN_NB,
-					},
-				);
-			}
 			Some(mix_id)
 		} else {
 			None
@@ -840,26 +664,17 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		recipient_key: Option<&MixPublicKey>,
 		num_hops: &Option<usize>,
 		count: usize,
-		is_surb: Option<Option<&MixnetId>>,
-		is_external: bool,
-	) -> Result<(Option<MixnetId>, Vec<Vec<(MixnetId, MixPublicKey)>>), Error> {
-		let (start, recipient) = if let Some(external) = is_surb {
+		is_surb: bool,
+	) -> Result<Vec<Vec<(MixnetId, MixPublicKey)>>, Error> {
+		let (start, recipient) = if is_surb {
 			if let Some(recipient) = recipient {
-				if let Some(first) = external {
-					// send to the first external peer that will reply to use
-					(Some((recipient, recipient_key)), Some((first, None)))
-				} else {
-					(Some((recipient, recipient_key)), Some((&self.local_id, Some(&self.public))))
-				}
+				((recipient, recipient_key), Some((&self.local_id, Some(&self.public))))
 			} else {
 				// no recipient for a surb could be unreachable too.
 				return Err(Error::NoPath(None))
 			}
 		} else {
-			(
-				(!is_external).then(|| (&self.local_id, Some(&self.public))),
-				recipient.map(|r| (r, recipient_key)),
-			)
+			((&self.local_id, Some(&self.public)), recipient.map(|r| (r, recipient_key)))
 		};
 
 		let num_hops = num_hops.unwrap_or(self.num_hops);
@@ -868,109 +683,26 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		}
 
 		log::trace!(target: "mixnet", "Random path, length {:?}", num_hops);
-		self.topology.random_path_ext(&self.local_id, start, recipient, count, num_hops)
+		self.topology.random_path(start, recipient, count, num_hops)
 	}
 
 	fn cleanup(&mut self, now: Instant) {
 		self.fragments.cleanup(now);
 		self.surb.cleanup(now);
 		self.replay_filter.cleanup(now);
-		if let Some(queue) = self.forward_unconnected_message_queue.as_mut() {
-			queue.cleanup(now)
-		}
 	}
 
 	fn try_apply_topology_change(&mut self) {
 		if let Some(changed) = self.topology.changed_route() {
 			for peer_id in changed {
 				if let Some(connection) = self
-					.handshaken_peers_index
+					.routing_peers_index
 					.get(&peer_id)
 					.and_then(|ix| self.connected_peers.get_mut(*ix).and_then(Option::as_mut))
 				{
-					connection.update_kind(
-						&mut self.peer_counts,
-						&mut self.topology,
-						self.forward_unconnected_message_queue.as_mut(),
-						&self.window,
-						false,
-					);
+					connection.update_kind(&mut self.peer_counts, &mut self.topology, &self.window);
 				}
 			}
-		}
-		if let Some(need_conn) = self.topology.try_connect() {
-			let mut try_connect = Vec::new();
-			for peer_id in need_conn {
-				let mut maybe_net_id = None;
-				if let Some(ix) = self.handshaken_peers_index.get(&peer_id) {
-					if let Some(connection) =
-						self.connected_peers.get_mut(*ix).and_then(Option::as_mut)
-					{
-						log::trace!(target: "mixnet", "New routing set, already connected to peer.");
-						connection.update_kind(
-							&mut self.peer_counts,
-							&mut self.topology,
-							self.forward_unconnected_message_queue.as_mut(),
-							&self.window,
-							false,
-						);
-						continue
-					}
-				} else if let Some(net_id) = self.disconnected_peers.get(&peer_id) {
-					maybe_net_id = net_id.handshaken.clone();
-				}
-				log::trace!(target: "mixnet", "try connect {:?} -> {:?} - {:?}", self.local_id, peer_id, maybe_net_id.is_some());
-				try_connect.push((peer_id, maybe_net_id));
-			}
-			if !try_connect.is_empty() {
-				self.pending_events.push_back(MixnetEvent::TryConnect(try_connect));
-			}
-		}
-	}
-
-	fn try_reconnect(&mut self) {
-		let mut try_connect = Vec::new();
-		let ShouldConnectTo { peers, number, is_static } = self.topology.should_connect_to();
-		let already_connected = self.peer_counts.nb_connected_forward_routing;
-		if already_connected >= number && is_static {
-			return
-		}
-
-		if is_static {
-			for peer in peers.iter() {
-				if try_connect.len() == number - already_connected {
-					break
-				}
-				if !self.handshaken_peers_index.contains_key(peer) {
-					let disco_peer = self.disconnected_peers.get(peer);
-					try_connect.push((*peer, disco_peer.and_then(|peer| peer.handshaken.clone())));
-				}
-			}
-		} else {
-			// try connect more
-			for (i, peer) in peers.iter().enumerate() {
-				if i > number {
-					if try_connect.len() >= number - already_connected {
-						// this means that peers late in should connect
-						// will see their connection attempt not decrease.
-						// Could be parameterized for a less steep curve.
-						break
-					}
-				}
-				if !self.handshaken_peers_index.contains_key(peer) {
-					let disco_peer = self.disconnected_peers.entry(*peer).or_default();
-					if disco_peer.next_reconnect_attempt == 0 {
-						try_connect.push((*peer, disco_peer.handshaken.clone()));
-						disco_peer.next_reconnect_attempt = TRY_RECONNECT_DYN_NB;
-					} else {
-						disco_peer.next_reconnect_attempt -= 1;
-					}
-				}
-			}
-		};
-
-		if !try_connect.is_empty() {
-			self.pending_events.push_back(MixnetEvent::TryConnect(try_connect));
 		}
 	}
 
@@ -980,7 +712,6 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		}
 
 		self.try_apply_topology_change();
-		let mut try_reconnect = false;
 
 		if Poll::Ready(()) == self.next_message.poll_unpin(cx) {
 			let now = Instant::now();
@@ -998,13 +729,6 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 				self.window.current += Wrapping(nb_spent);
 				for _ in 0..nb_spent {
 					self.window.current_start += self.window_size;
-				}
-
-				if self.next_try_reconnect <= nb_spent {
-					try_reconnect = true;
-					self.next_try_reconnect = self.try_reconnect_every;
-				} else {
-					self.next_try_reconnect -= nb_spent;
 				}
 
 				if let Some(stats) = self.window.stats.as_mut() {
@@ -1047,7 +771,6 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		let mut all_pending = true;
 		let mut disconnected = Vec::new();
 		let mut recv_packets = Vec::new();
-		let mut queue_packet = None;
 
 		// TODO consider returning a list of event to try put this in all pending more frequently.
 		for ix in self.polling_random.iter_mut() {
@@ -1055,41 +778,9 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 				*ix = None;
 				continue;
 			};
-			match connection.poll(
-				cx,
-				&self.window,
-				&mut self.topology,
-				&mut self.peer_counts,
-				self.forward_unconnected_message_queue.as_mut(),
-			) {
-				Poll::Ready(ConnectionResult::Established(_peer_id, key)) => {
-					all_pending = false;
-					if let Some(sphinx_id) = connection.mixnet_id() {
-						self.topology.connected(*sphinx_id, key);
-						self.topology.peer_stats(&self.peer_counts);
-						self.disconnected_peers.remove(sphinx_id);
-						self.handshaken_peers_index
-							.insert(*sphinx_id, ix.expect("found a connection"));
-					}
-
-					self.pending_events
-						.push_back(MixnetEvent::Connected(connection.network_id(), key));
-				},
+			match connection.poll(cx, &self.window, &mut self.topology, &mut self.peer_counts) {
 				Poll::Ready(ConnectionResult::Broken(mixnet_id)) => {
-					let mut retry = false;
-					if let Some(mixnet_id) = mixnet_id.as_ref() {
-						if self.topology.should_connect_to().is_static {
-							// TODO or just peers.contains mixnet_id (could make more sense)
-							if self.topology.routing_to(&self.local_id, mixnet_id) {
-								retry = true;
-							}
-						} else {
-							// TODO should try more prio up to some limit among all disco
-						}
-					}
-
-					// same as pending
-					disconnected.push((connection.network_id(), mixnet_id, retry));
+					disconnected.push((connection.network_id(), mixnet_id));
 				},
 				Poll::Ready(ConnectionResult::Received(packet)) => {
 					all_pending = false;
@@ -1097,60 +788,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 						recv_packets.push((*sphinx_id, packet));
 					}
 				},
-				Poll::Ready(ConnectionResult::ExternalQuery(recipient, data, surbs)) => {
-					all_pending = false;
-					if let Some(tag) = surbs {
-						if let Some(id) = connection.mixnet_id() {
-							// TODO protect from deleting an existing one
-							self.surb.insert(
-								tag.clone(),
-								SurbsPersistances::FromExternal(*id, tag),
-								self.window.last_now,
-							);
-						}
-					}
-					queue_packet = Some((recipient, data));
-				},
-				Poll::Ready(ConnectionResult::ExternalReply(tag, payload)) => {
-					all_pending = false;
-					match sphinx::read_surb_payload(&tag, payload, &mut self.surb) {
-						Ok(Unwrapped::SurbsReply(payload, query, recipient)) => {
-							if let Ok(Some((message, kind))) = self
-								.fragments
-								.insert_fragment(payload, MessageType::FromSurbs(query, recipient))
-							{
-								log::debug!(target: "mixnet", "Imported surb from {:?} ({} bytes)", connection.network_id(), message.len());
-								return Poll::Ready(MixnetEvent::Message(DecodedMessage {
-									peer: connection.mixnet_id().cloned().unwrap_or_default(),
-									message,
-									kind,
-								}))
-							} else {
-								log::error!(target: "mixnet", "Surbs fragment from {:?}", connection.network_id());
-							}
-						},
-						Ok(_) => {
-							// is actually unreachable
-							log::trace!(target: "mixnet", "Unexpected surbs exteraln reply content.");
-						},
-						Err(error) => {
-							log::trace!(target: "mixnet", "Error reading external surb reply {:?}.", error);
-						},
-					}
-				},
-
 				Poll::Pending => (),
-			}
-		}
-
-		if let Some((recipient, data)) = queue_packet {
-			let mut rng = rand::thread_rng();
-			let delay = exp_delay(&mut rng, self.average_hop_delay);
-			if let Err(error) =
-				self.queue_packet(recipient, data, delay, PacketType::ForwardExternal)
-			{
-				log::trace!(target: "mixnet", "Error adding external packet {:}.", error);
-				// TODO reply with meta protocol to external with a failure.
 			}
 		}
 
@@ -1163,14 +801,10 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			}
 		}
 
-		if try_reconnect {
-			self.try_reconnect();
-		}
-
 		if !disconnected.is_empty() {
-			for (peer, from, retry) in disconnected.iter() {
-				log::trace!(target: "mixnet", "Disconnecting peer {:?} from {:?}, retry {:?}", from, self.local_id, retry);
-				self.remove_connected_peer(peer, false);
+			for (peer, from) in disconnected.iter() {
+				log::trace!(target: "mixnet", "Disconnecting peer {:?} from {:?}", from, self.local_id);
+				self.remove_connected_peer(peer, true);
 			}
 
 			return Poll::Ready(MixnetEvent::Disconnected(disconnected))
@@ -1215,7 +849,7 @@ impl<T: Configuration, C: Connection> Future for Mixnet<T, C> {
 pub struct ReplayTag(pub [u8; crate::core::sphinx::HASH_OUTPUT_SIZE]);
 
 pub struct SurbsCollection {
-	pending: MixnetCollection<ReplayTag, SurbsPersistances>,
+	pending: MixnetCollection<ReplayTag, SurbsPersistance>,
 }
 
 impl SurbsCollection {
@@ -1223,7 +857,7 @@ impl SurbsCollection {
 		SurbsCollection { pending: MixnetCollection::new(config.surb_ttl_ms) }
 	}
 
-	pub fn insert(&mut self, surb_id: ReplayTag, surb: SurbsPersistances, now: Instant) {
+	pub fn insert(&mut self, surb_id: ReplayTag, surb: SurbsPersistance, now: Instant) {
 		self.pending.insert(surb_id, surb, now);
 	}
 
@@ -1365,84 +999,6 @@ where
 	}
 }
 
-struct QueuedUnconnectedPackets {
-	messages: HashMap<MixnetId, VecDeque<(QueuedPacket, Wrapping<usize>)>>,
-	expiration: Duration,
-	exp_deque: VecDeque<(Instant, Option<MixnetId>)>,
-	exp_deque_offset: Wrapping<usize>,
-	queue_message_unconnected_number: u32,
-}
-
-impl QueuedUnconnectedPackets {
-	pub fn new(ttl_ms: u64, queue_message_unconnected_number: u32) -> Self {
-		QueuedUnconnectedPackets {
-			messages: Default::default(),
-			expiration: Duration::from_millis(ttl_ms),
-			exp_deque: Default::default(),
-			exp_deque_offset: Wrapping(0),
-			queue_message_unconnected_number,
-		}
-	}
-
-	fn insert(&mut self, recipient: MixnetId, packet: QueuedPacket, now: Instant) {
-		let expires = now + self.expiration;
-		let ix = self.exp_deque_offset + Wrapping(self.exp_deque.len());
-		let queue = self.messages.entry(recipient).or_default();
-		if queue.len() == self.queue_message_unconnected_number as usize {
-			if let Some((message, ix)) = queue.pop_front() {
-				let ix = ix - self.exp_deque_offset;
-				self.exp_deque[ix.0].1 = None;
-				log::error!("Dropped message {:?} after {:?}", message.kind, self.expiration);
-			}
-		}
-		queue.push_back((packet, ix));
-		self.exp_deque.push_back((expires, Some(recipient)));
-	}
-
-	fn remove(
-		&mut self,
-		recipient: &MixnetId,
-	) -> Option<VecDeque<(QueuedPacket, Wrapping<usize>)>> {
-		let result = self.messages.remove(recipient);
-		if let Some(paquets) = result.as_ref() {
-			for (_, ix) in paquets.iter() {
-				let ix = ix - self.exp_deque_offset;
-				self.exp_deque[ix.0].1 = None;
-			}
-		}
-		result
-	}
-
-	fn cleanup(&mut self, now: Instant) {
-		while let Some(first) = self.exp_deque.front() {
-			if first.0 > now {
-				break
-			}
-			if let Some(first) = first.1.as_ref() {
-				let mut remove = false;
-				if let Some(messages) = self.messages.get_mut(first) {
-					if let Some(message) = messages.pop_front() {
-						debug_assert!(message.1 == self.exp_deque_offset);
-						log::error!(
-							"Dropped message {:?} after {:?}",
-							message.0.kind,
-							self.expiration
-						);
-					}
-					if messages.is_empty() {
-						remove = true;
-					}
-				}
-				if remove {
-					self.messages.remove(first);
-				}
-			}
-			self.exp_deque.pop_front();
-			self.exp_deque_offset += Wrapping(1);
-		}
-	}
-}
-
 pub(crate) fn cover_message_to(peer_id: &MixnetId, peer_key: MixPublicKey) -> Option<Packet> {
 	let mut rng = rand::thread_rng();
 	let message = fragment::Fragment::create_cover_fragment(&mut rng);
@@ -1476,9 +1032,6 @@ pub struct WindowStats {
 /// Current number of connected peers for the mixnet.
 #[derive(Default, Debug)]
 pub struct PeerCount {
-	/// Total number of nodes connected but
-	/// not already accepted.
-	pub nb_pending_handshake: usize,
 	/// Total number of connected nodes (handshake
 	/// successful).
 	pub nb_connected: usize,
@@ -1540,9 +1093,6 @@ impl PeerCount {
 
 	fn remove_peer(&mut self, kind: ConnectedKind) {
 		match kind {
-			ConnectedKind::PendingHandshake => {
-				self.nb_pending_handshake -= 1;
-			},
 			ConnectedKind::External | ConnectedKind::ExternalRouting => {
 				self.nb_connected -= 1;
 				self.nb_connected_external -= 1;

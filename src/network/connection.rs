@@ -20,7 +20,7 @@
 
 //! Network connection.
 
-use crate::{EXTERNAL_QUERY_SIZE_WITH_SURB, EXTERNAL_REPLY_SIZE, PACKET_SIZE};
+use crate::PACKET_SIZE;
 use futures::{channel::oneshot::Sender as OneShotSender, io::IoSlice, AsyncRead, AsyncWrite};
 use std::{
 	pin::Pin,
@@ -37,14 +37,10 @@ pub struct Connection {
 	outbound_buffer: Option<(Option<u8>, Vec<u8>, usize)>,
 	outbound_flushing: bool,
 	// size see consta assen
-	inbound_buffer: (Box<[u8; EXTERNAL_QUERY_SIZE_WITH_SURB]>, usize),
+	inbound_buffer: (Box<[u8; PACKET_SIZE]>, usize),
 	// Inform connection handler when connection is dropped.
 	close_handler: Option<OneShotSender<()>>,
 }
-
-static_assertions::const_assert!(EXTERNAL_QUERY_SIZE_WITH_SURB >= EXTERNAL_REPLY_SIZE);
-static_assertions::const_assert!(EXTERNAL_QUERY_SIZE_WITH_SURB >= EXTERNAL_REPLY_SIZE);
-static_assertions::const_assert!(EXTERNAL_QUERY_SIZE_WITH_SURB >= PACKET_SIZE);
 
 impl Drop for Connection {
 	fn drop(&mut self) {
@@ -112,10 +108,7 @@ impl ConnectionT for Connection {
 		}
 	}
 
-	fn try_recv(&mut self, cx: &mut Context, size: usize) -> Poll<Result<Option<Vec<u8>>, ()>> {
-		if size > EXTERNAL_QUERY_SIZE_WITH_SURB {
-			return Poll::Ready(Err(()))
-		}
+	fn try_recv(&mut self, cx: &mut Context) -> Poll<Result<Option<Vec<u8>>, ()>> {
 		match self.inbound.as_mut().map(|inbound| {
 			inbound
 				.as_mut()
@@ -123,17 +116,17 @@ impl ConnectionT for Connection {
 		}) {
 			Some(Poll::Ready(Ok(nb))) => {
 				// Some implementation return 0 on disconnection.
-				if nb == 0 && size != 0 {
+				if nb == 0 {
 					log::error!(target: "mixnet", "Transport reading 0 byte, disconnecting.");
 					return Poll::Ready(Err(()))
 				}
 				self.inbound_buffer.1 += nb;
-				let message = (self.inbound_buffer.1 == size).then(|| {
+				let message = (self.inbound_buffer.1 == PACKET_SIZE).then(|| {
 					self.inbound_buffer.1 = 0;
-					if size == self.inbound_buffer.0.len() {
+					if PACKET_SIZE == self.inbound_buffer.0.len() {
 						self.inbound_buffer.0.to_vec()
 					} else {
-						self.inbound_buffer.0[..size].to_vec()
+						self.inbound_buffer.0[..PACKET_SIZE].to_vec()
 					}
 				});
 				Poll::Ready(Ok(message))
@@ -161,7 +154,7 @@ impl Connection {
 			inbound: inbound.map(Box::pin),
 			outbound: Box::pin(outbound),
 			outbound_buffer: None,
-			inbound_buffer: (Box::new([0u8; EXTERNAL_QUERY_SIZE_WITH_SURB]), 0),
+			inbound_buffer: (Box::new([0u8; PACKET_SIZE]), 0),
 			outbound_flushing: false,
 			close_handler: Some(close_handler),
 		}
