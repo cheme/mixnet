@@ -93,15 +93,6 @@ impl ConnectedKind {
 	fn routing_forward(self) -> bool {
 		matches!(self, ConnectedKind::RoutingForward | ConnectedKind::RoutingReceiveForward)
 	}
-
-	fn routing_receive(self) -> bool {
-		matches!(
-			self,
-			ConnectedKind::RoutingReceive |
-				ConnectedKind::RoutingReceiveForward |
-				ConnectedKind::External
-		)
-	}
 }
 
 /// Sphinx packet struct, goal of this struct
@@ -275,11 +266,9 @@ pub struct Mixnet<T, C> {
 
 	pending_events: VecDeque<MixnetEvent>,
 
-	/// If define we use internal reception buffer with limited.
 	/// We receive eagerly and if buffer limit size is exceeded, we close connection.
 	/// First window after a connection is always ignored.
-	/// TODO do not allow reconnect on close connection.
-	receive_buffer: Option<usize>,
+	receive_buffer: usize,
 }
 
 /// Mixnet window current state.
@@ -314,9 +303,8 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 
 		let now = Instant::now();
 		let stats = topology.collect_windows_stats().then(WindowStats::default);
-		let receive_buffer = config
-			.receive_margin_ms
-			.map(|size_ms| (size_ms * 1_000_000 / packet_duration_nanos) as usize);
+		let receive_buffer =
+			(config.receive_margin_ms * 1_000_000 / packet_duration_nanos) as usize;
 
 		Mixnet {
 			topology,

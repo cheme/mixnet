@@ -96,7 +96,7 @@ pub(crate) struct ManagedConnection<C> {
 	// Using an internal buffer we can just drop connection earlier
 	// by receiving all and dropping when this buffer grow out
 	// of the expected badwidth limits.
-	receive_buffer: Option<(VecDeque<Packet>, usize, usize)>,
+	receive_buffer: (VecDeque<Packet>, usize, usize),
 	stats: Option<(ConnectionStats, Option<PacketType>)>,
 }
 
@@ -108,7 +108,7 @@ impl<C: Connection> ManagedConnection<C> {
 		connection: C,
 		current_window: Wrapping<usize>,
 		with_stats: bool,
-		receive_buffer: Option<usize>,
+		receive_buffer: usize,
 		topology: &mut impl Configuration,
 		peer_counts: &mut PeerCount,
 	) -> Self {
@@ -136,7 +136,7 @@ impl<C: Connection> ManagedConnection<C> {
 			gracefull_nb_packet_receive: 0,
 			gracefull_nb_packet_send: 0,
 			gracefull_disconnecting: None,
-			receive_buffer: receive_buffer.map(|size| (VecDeque::new(), 0, size)),
+			receive_buffer: (VecDeque::new(), 0, receive_buffer),
 		}
 	}
 
@@ -413,49 +413,28 @@ impl<C: Connection> ManagedConnection<C> {
 		}
 
 		// Limit reception.
-		let current = if self.kind.routing_receive() { window.current_packet_limit } else { 0 };
-		let current = if self.gracefull_nb_packet_receive > 0 {
-			window.current_packet_limit / 2
-		} else {
-			current
-		};
+		let current = window.current_packet_limit;
 		let can_receive = self.recv_in_window < current;
-		if self.receive_buffer.is_some() || can_receive {
-			loop {
-				match self.try_recv_packet(cx, window.current) {
-					Poll::Ready(Ok(packet)) => {
-						self.recv_in_window += 1;
-						if self.gracefull_nb_packet_receive > 0 {
-							self.gracefull_nb_packet_receive -= 1;
-							if self.gracefull_nb_packet_send == 0 &&
-								self.gracefull_nb_packet_receive == 0 &&
-								self.gracefull_disconnecting.is_some()
-							{
-								self.gracefull_disconnecting = Some(window.last_now);
-							}
-						}
-
-						if let Some((buf, underbuf, limit)) = self.receive_buffer.as_mut() {
-							buf.push_back(packet);
-							if buf.len() > *limit + *underbuf {
-								log::warn!(target: "mixnet", "Disconnecting, received too many messages");
-								return Poll::Ready(Err(()))
-							}
-						} else {
-							return Poll::Ready(Ok(ConnectionResult::Received(packet)))
-						}
-					},
-					Poll::Ready(Err(())) => return Poll::Ready(Err(())),
-					Poll::Pending => break,
-				}
-			}
-
-			if can_receive {
-				if let Some((buf, _underbuf, _limit)) = self.receive_buffer.as_mut() {
-					if let Some(mess) = buf.pop_front() {
-						return Poll::Ready(Ok(ConnectionResult::Received(mess)))
+		loop {
+			match self.try_recv_packet(cx, window.current) {
+				Poll::Ready(Ok(packet)) => {
+					self.recv_in_window += 1;
+					let (buf, underbuf, limit) = &mut self.receive_buffer;
+					buf.push_back(packet);
+					if buf.len() > *limit + *underbuf {
+						log::warn!(target: "mixnet", "Disconnecting, received too many messages");
+						return Poll::Ready(Err(()))
 					}
-				}
+				},
+				Poll::Ready(Err(())) => return Poll::Ready(Err(())),
+				Poll::Pending => break,
+			}
+		}
+
+		if can_receive {
+			let (buf, _underbuf, _limit) = &mut self.receive_buffer;
+			if let Some(mess) = buf.pop_front() {
+				return Poll::Ready(Ok(ConnectionResult::Received(mess)))
 			}
 		}
 
@@ -482,10 +461,9 @@ impl<C: Connection> ManagedConnection<C> {
 
 			self.current_window = window.current;
 			self.sent_in_window = 0;
-			if let Some((_buff, underbuf, _limit)) = self.receive_buffer.as_mut() {
-				if self.recv_in_window < window.packet_per_window {
-					*underbuf += window.packet_per_window - self.recv_in_window;
-				}
+			let (_buff, underbuf, _limit) = &mut self.receive_buffer;
+			if self.recv_in_window < window.packet_per_window {
+				*underbuf += window.packet_per_window - self.recv_in_window;
 			}
 			self.recv_in_window = 0;
 		}

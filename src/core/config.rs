@@ -30,6 +30,9 @@ const DEFAULT_PEER_CONNECTION: u32 = 128 * 1024;
 /// Size of the polling window in time.
 pub const DEFAULT_WINDOW_SIZE: Duration = Duration::from_secs(2);
 
+/// Size of the exceed recive that trigger a disconnect for a window
+pub const DEFAULT_RECEIVE_MARGIN: Duration = Duration::from_secs(1);
+
 const DEFAULT_NO_YIELD_BUDGET: usize = 128;
 
 /// Configuration data for the mixnet protocol.
@@ -67,7 +70,7 @@ pub struct Config {
 	/// When defined, a given of bandwidth is allowed to be receive
 	/// ahead.
 	/// Otherwhise transport buffer is filled.
-	pub receive_margin_ms: Option<u64>,
+	pub receive_margin_ms: u64,
 }
 
 impl Config {
@@ -95,7 +98,10 @@ impl Config {
 				.as_millis()
 				.try_into()
 				.expect("Window duration too big"),
-			receive_margin_ms: None,
+			receive_margin_ms: DEFAULT_RECEIVE_MARGIN
+				.as_millis()
+				.try_into()
+				.expect("Margin too big"),
 		}
 	}
 }

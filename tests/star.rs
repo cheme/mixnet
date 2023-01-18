@@ -235,7 +235,7 @@ fn test_messages(conf: TestConfig) {
 		replay_ttl_ms: 100_000,
 		surb_ttl_ms: 100_000,
 		window_size_ms: 2_000,
-		receive_margin_ms: None,
+		receive_margin_ms: 1_000,
 	};
 	let mut source_message = Vec::new();
 	use rand::SeedableRng;
