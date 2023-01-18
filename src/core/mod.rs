@@ -93,6 +93,10 @@ impl ConnectedKind {
 	fn routing_forward(self) -> bool {
 		matches!(self, ConnectedKind::RoutingForward | ConnectedKind::RoutingReceiveForward)
 	}
+
+	fn routing_receive(self) -> bool {
+		matches!(self, ConnectedKind::RoutingReceive | ConnectedKind::RoutingReceiveForward)
+	}
 }
 
 /// Sphinx packet struct, goal of this struct

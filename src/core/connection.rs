@@ -34,10 +34,15 @@ use std::{
 	collections::{BinaryHeap, VecDeque},
 	num::Wrapping,
 	task::{Context, Poll},
-	time::{Duration, Instant},
+	time::Duration,
 };
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+// TODO make it configurable
+/// Only write cover every N expected cover (bandwidth will
+/// not be constant, but we can have many connection this way).
+const SKIP_COVER: usize = 8;
 
 macro_rules! try_poll {
 	( $call: expr ) => {
@@ -74,8 +79,6 @@ pub(crate) struct ManagedConnection<C> {
 	// Messages manually set are lower priority than the `packet_queue` one
 	// and will only replace cover messages.
 	// Warning this queue do not have a size limit, we trust.
-	// TODO have a safe mode that error on too big (but then
-	// need a mechanism to rollback other message chunk in other connections).
 	packet_queue_inject: BinaryHeap<QueuedPacket>,
 	// TODO most buff use Vec<u8>, but could use Packet
 	next_packet: Option<(Vec<u8>, PacketType)>,
@@ -84,12 +87,6 @@ pub(crate) struct ManagedConnection<C> {
 	current_window: Wrapping<usize>,
 	sent_in_window: usize,
 	recv_in_window: usize,
-	gracefull_nb_packet_receive: usize,
-	gracefull_nb_packet_send: usize,
-	// hard limit when disconnecting, should
-	// disconnect when connection broken or gracefull_nb_packet
-	// both at 0.
-	gracefull_disconnecting: Option<Instant>, // TODO gracefull conf in a single struct for clarity
 	// Receive is only call to match the expected bandwidth.
 	// Yet with most transport it will just make the transport
 	// buffer grow.
@@ -98,6 +95,7 @@ pub(crate) struct ManagedConnection<C> {
 	// of the expected badwidth limits.
 	receive_buffer: (VecDeque<Packet>, usize, usize),
 	stats: Option<(ConnectionStats, Option<PacketType>)>,
+	skipped_cover: usize,
 }
 
 impl<C: Connection> ManagedConnection<C> {
@@ -133,10 +131,8 @@ impl<C: Connection> ManagedConnection<C> {
 			packet_queue: Default::default(),
 			packet_queue_inject: Default::default(),
 			stats: with_stats.then(Default::default),
-			gracefull_nb_packet_receive: 0,
-			gracefull_nb_packet_send: 0,
-			gracefull_disconnecting: None,
 			receive_buffer: (VecDeque::new(), 0, receive_buffer),
+			skipped_cover: 0,
 		}
 	}
 
@@ -244,7 +240,7 @@ impl<C: Connection> ManagedConnection<C> {
 				return Ok(())
 			}
 
-			if !(self.kind.routing_forward() || self.gracefull_nb_packet_send > 0) {
+			if !self.kind.routing_forward() {
 				log::error!(target: "mixnet", "Dropping an injected queued packet, not routing to first hop {:?}.", self.kind);
 				return Err(crate::Error::NoPath(Some(*peer_id)))
 			}
@@ -298,11 +294,6 @@ impl<C: Connection> ManagedConnection<C> {
 		topology: &mut impl Configuration,
 		peers: &mut PeerCount,
 	) -> Poll<ConnectionResult> {
-		if let Some(gracefull_disco_deadline) = self.gracefull_disconnecting.as_ref() {
-			if gracefull_disco_deadline <= &window.last_now {
-				return self.broken_connection(topology, peers)
-			}
-		}
 		// pending return on receive pending.
 		// If this is not expecting to receive (forward only), we still return pending
 		// (send is triggered by timer from calling method).
@@ -318,12 +309,14 @@ impl<C: Connection> ManagedConnection<C> {
 			Poll::Pending => (),
 		}
 
-		match self.read_timeout.poll_unpin(cx) {
-			Poll::Ready(()) => {
-				log::trace!(target: "mixnet", "Peer, nothing received for too long, dropping.");
-				return self.broken_connection(topology, peers)
-			},
-			Poll::Pending => (),
+		if self.kind.routing_receive() {
+			match self.read_timeout.poll_unpin(cx) {
+				Poll::Ready(()) => {
+					log::trace!(target: "mixnet", "Peer, nothing received for too long, dropping.");
+					return self.broken_connection(topology, peers)
+				},
+				Poll::Pending => (),
+			}
 		}
 		result
 	}
@@ -334,26 +327,13 @@ impl<C: Connection> ManagedConnection<C> {
 		window: &WindowInfo,
 	) -> Poll<Result<ConnectionResult, ()>> {
 		// routing
-		let send_limit = if self.gracefull_nb_packet_send > 0 {
-			window.current_packet_limit / 2
-		} else {
-			window.current_packet_limit
-		};
+		let send_limit = window.current_packet_limit;
 		// Forward first.
 		while self.sent_in_window < send_limit {
 			match try_poll!(self.try_send_flushed(cx, true)) {
 				Some(true) => {
 					// Did send message
 					self.sent_in_window += 1;
-					if self.gracefull_nb_packet_send > 0 {
-						self.gracefull_nb_packet_send -= 1;
-						if self.gracefull_nb_packet_send == 0 &&
-							self.gracefull_nb_packet_receive == 0 &&
-							self.gracefull_disconnecting.is_some()
-						{
-							return Poll::Ready(Err(()))
-						}
-					}
 					break
 				},
 				Some(false) => {
@@ -392,12 +372,17 @@ impl<C: Connection> ManagedConnection<C> {
 						if self.next_packet.is_none() && self.kind.routing_forward() {
 							if let Some(key) = self.public_key {
 								if let Some(peer_id) = self.peer_id {
-									self.next_packet = crate::core::cover_message_to(&peer_id, key)
-										.map(|p| (p.into_vec(), PacketType::Cover));
-									if self.next_packet.is_none() {
-										log::error!(target: "mixnet", "Could not create cover for {:?}", self.network_id);
-										if let Some(stats) = self.stats.as_mut() {
-											stats.0.number_cover_send_failed += 1;
+									if self.skipped_cover != SKIP_COVER {
+										self.skipped_cover += 1;
+									} else {
+										self.next_packet =
+											crate::core::cover_message_to(&peer_id, key)
+												.map(|p| (p.into_vec(), PacketType::Cover));
+										if self.next_packet.is_none() {
+											log::error!(target: "mixnet", "Could not create cover for {:?}", self.network_id);
+											if let Some(stats) = self.stats.as_mut() {
+												stats.0.number_cover_send_failed += 1;
+											}
 										}
 									}
 								}
