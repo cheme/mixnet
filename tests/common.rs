@@ -20,8 +20,6 @@
 
 //! Tests utility (simple implementation of mixnet around local libp2p transport).
 
-use ambassador::Delegate;
-use codec::{Decode, Encode, Input, Output};
 use futures::{channel::mpsc, executor::ThreadPool, prelude::*, task::SpawnExt};
 use libp2p_core::{
 	identity,
@@ -31,28 +29,20 @@ use libp2p_core::{
 };
 use libp2p_mplex as mplex;
 use libp2p_noise as noise;
-use libp2p_swarm::{DialError, Swarm, SwarmEvent};
+use libp2p_swarm::{Swarm, SwarmEvent};
 use libp2p_tcp::{GenTcpConfig, TcpTransport};
 use mixnet::{
-	ambassador_impl_Topology,
-	traits::{
-		hash_table::{RoutingTable, TableVersion},
-		Configuration, NewRoutingSet, Topology,
-	},
-	Config, Error, MixPublicKey, MixSecretKey, MixnetBehaviour, MixnetCommandSink, MixnetEvent,
-	MixnetId, MixnetWorker, PeerCount, SendOptions, SinkToWorker, StreamFromWorker, WorkerChannels,
-	WorkerCommand,
+	traits::Configuration, Config, MixPublicKey, MixSecretKey, MixnetBehaviour, MixnetCommandSink,
+	MixnetEvent, MixnetId, MixnetWorker, SendOptions, SinkToWorker, StreamFromWorker,
+	WorkerChannels, WorkerCommand,
 };
 use parking_lot::RwLock;
 use rand::{rngs::SmallRng, RngCore};
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+	collections::{HashMap, HashSet},
 	sync::{atomic::AtomicBool, Arc},
 	task::Poll,
 };
-
-use futures_timer::Delay;
-use std::{pin::Pin, task::Context, time::Duration};
 
 /// Message that test peer replies with.
 pub enum PeerTestReply {
@@ -60,13 +50,8 @@ pub enum PeerTestReply {
 	ReceiveMessage(mixnet::DecodedMessage),
 }
 
-pub enum SwarmMessage {
-	Dial(Option<MixnetId>, Option<NetworkId>),
-}
-
 pub type TestChannels = (mpsc::Receiver<PeerTestReply>, MixnetCommandSink);
-pub type Worker<T> =
-	(MixnetWorker<T>, NetworkId, mpsc::Sender<WorkerCommand>, mpsc::Sender<SwarmMessage>);
+pub type Worker<T> = (MixnetWorker<T>, NetworkId, mpsc::Sender<WorkerCommand>);
 
 #[macro_export]
 macro_rules! log_unwrap {
@@ -114,72 +99,48 @@ fn mk_transport(
 }
 
 /// New transport and associated elements.
-pub type NewTransport = (
-	NetworkId,
-	transport::Boxed<(NetworkId, StreamMuxerBox)>,
-	SinkToWorker,
-	StreamFromWorker,
-	mpsc::Receiver<SwarmMessage>,
-);
+pub type NewTransport =
+	(NetworkId, transport::Boxed<(NetworkId, StreamMuxerBox)>, SinkToWorker, StreamFromWorker);
 
 fn mk_transports(
 	num_peers: usize,
 	extra_external: usize,
-) -> (
-	Vec<NewTransport>,
-	Vec<(NetworkId, WorkerChannels, mpsc::Sender<WorkerCommand>, mpsc::Sender<SwarmMessage>)>,
-) {
+) -> (Vec<NewTransport>, Vec<(NetworkId, WorkerChannels, mpsc::Sender<WorkerCommand>)>) {
 	let mut transports = Vec::<NewTransport>::new();
-	let mut handles = Vec::<(_, WorkerChannels, _, _)>::new();
+	let mut handles = Vec::<(_, WorkerChannels, _)>::new();
 	for _ in 0..num_peers + extra_external {
 		let (to_worker_sink, to_worker_stream) = mpsc::channel(1000);
 		let (from_worker_sink, from_worker_stream) = mpsc::channel(1000);
 		let to_worker_from_test = to_worker_sink.clone();
-		let (to_swarm_sink, to_swarm_stream) = mpsc::channel(1000);
 
 		let (peer_id, _peer_key, trans) = mk_transport();
-		transports.push((
-			peer_id,
-			trans,
-			Box::new(to_worker_sink),
-			Box::new(from_worker_stream),
-			to_swarm_stream,
-		));
+		transports.push((peer_id, trans, Box::new(to_worker_sink), Box::new(from_worker_stream)));
 		handles.push((
 			peer_id,
 			(Box::new(from_worker_sink), Box::new(to_worker_stream)),
 			to_worker_from_test,
-			to_swarm_sink,
 		));
 	}
 	(transports, handles)
 }
 
-fn mk_swarms(
-	transports: Vec<NewTransport>,
-) -> Vec<(Swarm<MixnetBehaviour>, mpsc::Receiver<SwarmMessage>)> {
+fn mk_swarms(transports: Vec<NewTransport>) -> Vec<Swarm<MixnetBehaviour>> {
 	let mut swarms = Vec::with_capacity(transports.len());
 
-	for (peer_id, trans, to_worker_sink, from_worker_stream, to_swarm_stream) in
-		transports.into_iter()
-	{
+	for (peer_id, trans, to_worker_sink, from_worker_stream) in transports.into_iter() {
 		let mixnet = mixnet::MixnetBehaviour::new(to_worker_sink, from_worker_stream);
 		let mut swarm = Swarm::new(trans, mixnet, peer_id);
 		let addr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
 		log_unwrap!(swarm.listen_on(addr));
-		swarms.push((swarm, to_swarm_stream));
+		swarms.push(swarm);
 	}
+
 	swarms
 }
 
 /// Spawn a libp2p local swarm with all peers.
 pub fn mk_workers<T: Configuration>(
-	handles: Vec<(
-		NetworkId,
-		WorkerChannels,
-		mpsc::Sender<WorkerCommand>,
-		mpsc::Sender<SwarmMessage>,
-	)>,
+	handles: Vec<(NetworkId, WorkerChannels, mpsc::Sender<WorkerCommand>)>,
 	rng: &mut SmallRng,
 	config_proto: &Config,
 	mut make_topo: impl FnMut(
@@ -194,7 +155,7 @@ pub fn mk_workers<T: Configuration>(
 
 	let mut nodes = Vec::new();
 	let mut secrets = Vec::new();
-	for (network_id, _, _, _) in handles.iter() {
+	for (network_id, _, _) in handles.iter() {
 		let (peer_public_key, peer_secret_key) = mixnet::generate_new_keys();
 		let mut secret_mix = [0u8; 32];
 		rng.fill_bytes(&mut secret_mix);
@@ -207,8 +168,7 @@ pub fn mk_workers<T: Configuration>(
 
 	let mut workers = Vec::new();
 
-	for (i, (network_id, (from_worker_sink, to_worker_stream), to_worker, to_swarm)) in
-		handles.into_iter().enumerate()
+	for (i, (_, (from_worker_sink, to_worker_stream), to_worker)) in handles.into_iter().enumerate()
 	{
 		let (id, pub_key, network_id) = nodes[i];
 		let cfg = mixnet::Config {
@@ -224,7 +184,6 @@ pub fn mk_workers<T: Configuration>(
 			mixnet::MixnetWorker::new(cfg, topo, (from_worker_sink, to_worker_stream)),
 			network_id,
 			to_worker,
-			to_swarm,
 		));
 	}
 	workers
@@ -260,15 +219,11 @@ pub fn spawn_swarms<T: Configuration>(
 		.iter()
 		.zip(swarms.iter())
 		.enumerate()
-		.map(|(p, (worker, swarm))| (*worker.0.mixnet().local_id(), (*swarm.0.local_peer_id(), p)))
+		.map(|(p, (worker, swarm))| (*worker.0.mixnet().local_id(), (*swarm.local_peer_id(), p)))
 		.collect();
 	let addresses: Vec<Option<Multiaddr>> = vec![None; swarms.len()];
 	let peer_ids = Arc::new(peer_ids);
 	let addresses = Arc::new(RwLock::new(addresses));
-	// to_wait and to_notify just synched the peer starting, so all dial are succesful.
-	// This should be remove or optional if mixnet got non connected use case.
-	// TODO just test dial (list of peers) and retry dial simple system (synch is complex for no
-	// reason). TODO same for dht this is not needed (online offline is routing table dependant).
 	let mut to_notify = (0..num_peers + extra_external).map(|_| Vec::new()).collect::<Vec<_>>();
 	let mut to_wait = (0..num_peers + extra_external).map(|_| Vec::new()).collect::<Vec<_>>();
 
@@ -289,78 +244,72 @@ pub fn spawn_swarms<T: Configuration>(
 	let mut swarm_futures = Vec::with_capacity(swarms.len());
 
 	let inital_connection = Arc::new(AtomicBool::new(false));
-	for (p, (mut swarm, mut receiver_swarm)) in swarms.into_iter().enumerate() {
+	let nb_swarms = swarms.len();
+	for (p, mut swarm) in swarms.into_iter().enumerate() {
 		let mut to_notify = std::mem::take(&mut to_notify[p]);
 		let mut to_wait = std::mem::take(&mut to_wait[p]);
 		let peer_ids = peer_ids.clone();
 		let addresses = addresses.clone();
 		let inital_connection = inital_connection.clone();
+		/*		let mut connect_to: BTreeSet<usize> = Default::default();
+		for i in 0..nb_swarms {
+			if i < p {
+				connect_to.insert(i);
+			} else {
+				break;
+			}
+		}*/
 		let poll_fn = async move {
 			let mut num_connected_p2p = 0isize;
 			loop {
+				/*				let mut conn = Vec::new();
+				for p in connect_to.iter() {
+					log::trace!(target: "mixnet_test", "Dialing to {:?}", p);
+					if let Some(address) = addresses.read()[*p].as_ref() {
+						let e = swarm.dial(address.clone());
+						if e.is_err() {
+							log::error!(target: "mixnet_test", "Dialing fail with {:?}", e);
+						} else {
+							conn.push(*p);
+						}
+					}
+				}
+				for p in conn {
+					connect_to.remove(&p);
+				}*/
 				futures::select!(
-						a = receiver_swarm.select_next_some() => match a {
-							SwarmMessage::Dial(mix_id, network_id) => {
-							if let Some(network_id) = network_id {
-								log::trace!(target: "mixnet_test", "Dialing to {:?}", mix_id);
-								if let Err(e) = swarm.dial(network_id) {
-									log::trace!(target: "mixnet_test", "Dialing fail with id only {:?}", e);
-								} else {
-									continue;
-								}
-							} if let Some((network_id, p)) = mix_id.as_ref().and_then(|m| peer_ids.get(m)) {
-								if inital_connection.load(std::sync::atomic::Ordering::Relaxed) {
-									log::trace!(target: "mixnet_test", "Dialing to {:?}", mix_id);
-									let e = swarm.dial(*network_id);
-									if let Err(DialError::NoAddresses) = e {
-										if let Some(address) = addresses.read()[*p].as_ref() {
-											let e = swarm.dial(address.clone());
-											if e.is_err() {
-												log::error!(target: "mixnet_test", "Dialing fail with {:?}", e);
-											}
-										}
-									} else {
-										log::error!(target: "mixnet_test", "Dialing fail with {:?}", e);
-									}
-								}
-							} else {
-								log::error!(target: "mixnet_test", "Could not try connect");
-							}
-							},
-						},
-						b = swarm.select_next_some() => match b {
-						SwarmEvent::NewListenAddr { address, .. } => {
-							addresses.write()[p] = Some(address.clone());
-							for mut tx in to_notify.drain(..) {
-								log_unwrap!(tx.send(address.clone()).await)
-							}
-							for mut rx in to_wait.drain(..) {
-								log_unwrap!(swarm.dial(log_unwrap_opt!(rx.next().await)));
-							}
-						},
-						SwarmEvent::Behaviour(mixnet::BehaviourEvent::None) => (),
-						SwarmEvent::Behaviour(mixnet::BehaviourEvent::CloseStream) => {
-							log::error!(target: "mixnet_test", "Stream close, no message incomming.");
-							return
-						},
-						SwarmEvent::ConnectionEstablished { .. } => {
-							num_connected_p2p += 1;
-							log::trace!(target: "mixnet_test", "{} P2p connected  {}", p, num_connected_p2p);
-						},
-						SwarmEvent::ConnectionClosed { .. } => {
-							num_connected_p2p -= 1;
-							log::trace!(target: "mixnet_test", "{} P2p disconnected  {}", p, num_connected_p2p);
-						},
-						SwarmEvent::IncomingConnection { .. } |
-						SwarmEvent::BannedPeer { .. } |
-						SwarmEvent::ExpiredListenAddr { .. } |
-						SwarmEvent::Dialing { .. } |
-						SwarmEvent::ListenerClosed { .. } |
-						SwarmEvent::ListenerError { .. } |
-						SwarmEvent::OutgoingConnectionError { .. } |
-						SwarmEvent::IncomingConnectionError { .. } => (),
+					a = swarm.select_next_some() => match a {
+					SwarmEvent::NewListenAddr { address, .. } => {
+						addresses.write()[p] = Some(address.clone());
+						for mut tx in to_notify.drain(..) {
+							log_unwrap!(tx.send(address.clone()).await)
+						}
+						for mut rx in to_wait.drain(..) {
+							log_unwrap!(swarm.dial(log_unwrap_opt!(rx.next().await)));
+						}
 					},
-				)
+					SwarmEvent::Behaviour(mixnet::BehaviourEvent::None) => (),
+					SwarmEvent::Behaviour(mixnet::BehaviourEvent::CloseStream) => {
+						log::error!(target: "mixnet_test", "Stream close, no message incomming.");
+						return
+					},
+					SwarmEvent::ConnectionEstablished { .. } => {
+						num_connected_p2p += 1;
+						log::trace!(target: "mixnet_test", "{} P2p connected  {}", p, num_connected_p2p);
+					},
+					SwarmEvent::ConnectionClosed { .. } => {
+						num_connected_p2p -= 1;
+						log::trace!(target: "mixnet_test", "{} P2p disconnected  {}", p, num_connected_p2p);
+					},
+					SwarmEvent::IncomingConnection { .. } |
+					SwarmEvent::BannedPeer { .. } |
+					SwarmEvent::ExpiredListenAddr { .. } |
+					SwarmEvent::Dialing { .. } |
+					SwarmEvent::ListenerClosed { .. } |
+					SwarmEvent::ListenerError { .. } |
+					SwarmEvent::OutgoingConnectionError { .. } |
+					SwarmEvent::IncomingConnectionError { .. } => (),
+				})
 			}
 		};
 		swarm_futures.push(Box::pin(poll_fn));
@@ -382,6 +331,22 @@ pub fn spawn_swarms<T: Configuration>(
 			}
 		}
 	})));
+
+	/* TODO rem
+	let ids: Vec<NetworkId> = swarms.iter().map(|swarm| *swarm.0.local_peer_id()).collect();
+	// all peer are staying connected to each others.
+	for i in 0..swarms.len() {
+		for j in 0..swarms.len() {
+			if i == j {
+				continue;
+			}
+			if let Err(e) = swarms[i].0.dial(ids[j]) {
+				panic!("cannot connect all network {:?}", e);
+			}
+		}
+	}
+	*/
+
 	(workers, inital_connection)
 }
 
@@ -398,7 +363,7 @@ pub fn spawn_workers<T: Configuration>(
 	let mut test_channels = Vec::with_capacity(workers.len());
 	let mut workers_futures = Vec::with_capacity(workers.len());
 
-	for (p, (mut worker, network_id, to_worker, mut to_swarm)) in workers.into_iter().enumerate() {
+	for (p, (mut worker, network_id, to_worker)) in workers.into_iter().enumerate() {
 		let external_1 = from_external && p == num_peers;
 		let external_2 = from_external && p > num_peers;
 		let mut target_peers = if from_external && p == 0 {
@@ -495,67 +460,6 @@ pub fn spawn_workers<T: Configuration>(
 		})));
 	}
 	(nodes, test_channels)
-}
-
-/// Simple key signing handshake.
-/// Handshake is our MixnetId concatenated with
-/// MixPublicKey and a signature of NetworkId peer
-/// concatenated with the mix public key.
-/// Signing key is MixnetId (we use the publickey as Mixpeerid).
-#[derive(Clone, Delegate)]
-#[delegate(Topology, target = "topo")]
-pub struct SimpleHandshake<T> {
-	pub local_id: Option<MixnetId>,
-	pub local_network_id: Option<NetworkId>,
-	pub topo: T,
-	// key for signing handshake (assert mix_pub_key, MixnetId is related to
-	// MixPublicKey by signing it (and also dest MixPublicKey to avoid replay).
-	pub mix_secret_key: Option<Arc<(ed25519_zebra::SigningKey, ed25519_zebra::VerificationKey)>>,
-}
-
-impl<T: Topology> mixnet::traits::Handshake for SimpleHandshake<T> {
-	fn handshake_size(&self) -> usize {
-		32 + 32 + 64
-	}
-
-	fn check_handshake(
-		&self,
-		payload: &[u8],
-		_from: &NetworkId,
-	) -> Option<(MixnetId, MixPublicKey)> {
-		let mut peer_id = [0u8; 32];
-		peer_id.copy_from_slice(&payload[0..32]);
-		//		let peer_id = mixnet::to_sphinx_id(&payload[0..32]).ok()?;
-		let mut pk = [0u8; 32];
-		pk.copy_from_slice(&payload[32..64]);
-		let mut signature = [0u8; 64];
-		signature.copy_from_slice(&payload[64..]);
-		let signature = log_unwrap!(ed25519_zebra::Signature::try_from(&signature[..]));
-		let pub_key = log_unwrap!(ed25519_zebra::VerificationKey::try_from(&peer_id[..]));
-		let mut message = log_unwrap_opt!(self.local_network_id).to_bytes().to_vec();
-		message.extend_from_slice(&pk[..]);
-		if pub_key.verify(&signature, &message[..]).is_ok() {
-			let pk = MixPublicKey::from(pk);
-			Some((peer_id, pk))
-		} else {
-			None
-		}
-	}
-
-	fn handshake(&self, with: &NetworkId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
-		let mut result = log_unwrap_opt!(self.local_id.as_ref()).to_vec();
-		result.extend_from_slice(&public_key.as_bytes()[..]);
-		if let Some(keypair) = &self.mix_secret_key {
-			let mut message = with.to_bytes().to_vec();
-			message.extend_from_slice(&public_key.as_bytes()[..]);
-			let signature = keypair.0.sign(&message[..]);
-			let signature: [u8; 64] = signature.into();
-			result.extend_from_slice(&signature[..]);
-		} else {
-			return None
-		}
-		Some(result)
-	}
 }
 
 #[derive(Clone, Copy)]

@@ -93,7 +93,7 @@ impl MessageType {
 pub struct DecodedMessage {
 	/// The peer ID of the last hop that we have received the message from. This is not the message
 	/// origin.
-	pub peer: MixnetId,
+	pub peer: Option<MixnetId>,
 	/// Message data.
 	pub message: Vec<u8>,
 	/// Message kind.

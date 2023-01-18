@@ -57,9 +57,6 @@ pub type MixPublicKey = sphinx::PublicKey;
 /// Mixnet peer DH static secret key.
 pub type MixSecretKey = sphinx::StaticSecret;
 
-/// Length of `MixPublicKey`
-pub const PUBLIC_KEY_LEN: usize = 32;
-
 /// Size of a mixnet packet.
 pub const PACKET_SIZE: usize = sphinx::OVERHEAD_SIZE + fragment::FRAGMENT_PACKET_SIZE;
 
@@ -108,7 +105,9 @@ impl ConnectedKind {
 	}
 
 	fn routing_receive(self) -> bool {
-		matches!(self, ConnectedKind::RoutingReceive | ConnectedKind::RoutingReceiveForward)
+		true
+		//matches!(self, ConnectedKind::RoutingReceive | ConnectedKind::RoutingReceiveForward |
+		// ConnectedKind::External)
 	}
 }
 
@@ -147,7 +146,7 @@ impl Packet {
 
 pub enum MixnetEvent {
 	/// A new peer has connected.
-	Connected(NetworkId, MixPublicKey),
+	Connected(NetworkId, Option<MixnetId>),
 	Disconnected(Vec<(NetworkId, Option<MixnetId>)>),
 	/// A message has reached us.
 	Message(DecodedMessage),
@@ -403,7 +402,6 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		let peer_id = self.topology.get_mixnet_id(&network_id);
 		let connection = ManagedConnection::new(
 			self.local_id,
-			self.public,
 			network_id,
 			peer_id,
 			connection,
@@ -414,9 +412,13 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			&mut self.peer_counts,
 		);
 		self.connected_peers_index.insert(network_id, self.connected_peers.len());
+		if let Some(peer_id) = peer_id {
+			self.routing_peers_index.insert(peer_id, self.connected_peers.len());
+		}
 		self.polling_random.push(Some(self.connected_peers.len()));
 		self.connected_peers.push(Some(connection));
 		self.topology.peer_stats(&self.peer_counts);
+		self.pending_events.push_back(MixnetEvent::Connected(network_id, peer_id));
 	}
 
 	pub fn connected_mut(&mut self, peer: &NetworkId) -> Option<&mut C> {
@@ -473,6 +475,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		self.try_apply_topology_change();
 		let mut rng = rand::thread_rng();
 
+		let is_external = !self.topology.can_route(&self.local_id);
 		let mut surb_query =
 			(self.persist_surb_query && send_options.with_surb).then(|| message.clone());
 
@@ -483,6 +486,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			&send_options.num_hop,
 			chunks.len(),
 			false,
+			is_external,
 		)?;
 
 		let mut surb = if send_options.with_surb {
@@ -493,7 +497,14 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 				peer_id.as_ref()
 			};
 			let paths = self
-				.random_paths(peer_id, peer_pub_key.as_ref(), &send_options.num_hop, 1, true)?
+				.random_paths(
+					peer_id,
+					peer_pub_key.as_ref(),
+					&send_options.num_hop,
+					1,
+					true,
+					is_external,
+				)?
 				.remove(0);
 			let first_node = paths[0].0;
 			let paths: Vec<_> = paths
@@ -571,7 +582,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 	/// fragment completes the message, full message is returned.
 	fn import_message(
 		&mut self,
-		peer_id: MixnetId,
+		peer_id: Option<MixnetId>,
 		message: Packet,
 	) -> Result<Option<(Vec<u8>, MessageType)>, Error> {
 		let next_delay =
@@ -622,7 +633,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			Ok(Unwrapped::Forward((next_id, delay, packet))) => {
 				// See if we can forward the message
 				log::debug!(target: "mixnet", "Forward message from {:?} to {:?}", peer_id, next_id);
-				let kind = if self.window.stats.is_some() && !self.topology.can_route(&peer_id) {
+				let kind = if self.window.stats.is_some() && peer_id.as_ref().map(|id| !self.topology.can_route(id)).unwrap_or(true) {
 					PacketType::ForwardExternal
 				} else {
 					PacketType::Forward
@@ -665,25 +676,70 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		num_hops: &Option<usize>,
 		count: usize,
 		is_surb: bool,
+		is_external: bool,
 	) -> Result<Vec<Vec<(MixnetId, MixPublicKey)>>, Error> {
 		let (start, recipient) = if is_surb {
 			if let Some(recipient) = recipient {
-				((recipient, recipient_key), Some((&self.local_id, Some(&self.public))))
+				(Some((recipient, recipient_key)), Some((&self.local_id, Some(&self.public))))
 			} else {
 				// no recipient for a surb could be unreachable too.
 				return Err(Error::NoPath(None))
 			}
 		} else {
-			((&self.local_id, Some(&self.public)), recipient.map(|r| (r, recipient_key)))
+			(
+				(!is_external).then(|| (&self.local_id, Some(&self.public))),
+				recipient.map(|r| (r, recipient_key)),
+			)
 		};
 
-		let num_hops = num_hops.unwrap_or(self.num_hops);
+		let mut num_hops = num_hops.unwrap_or(self.num_hops);
+
+		log::trace!(target: "mixnet", "Random path, length {:?}", num_hops);
+		if is_external {
+			num_hops -= 1;
+		}
+
 		if num_hops > sphinx::MAX_HOPS {
 			return Err(Error::TooManyHops)
 		}
 
-		log::trace!(target: "mixnet", "Random path, length {:?}", num_hops);
-		self.topology.random_path(start, recipient, count, num_hops)
+		if let Some(start) = start {
+			self.topology.random_path(start, recipient, count, num_hops)
+		} else {
+			let firsts = self.topology.first_hop_nodes_external(
+				&self.local_id,
+				recipient.as_ref().map(|r| r.0),
+				num_hops,
+			);
+			if firsts.is_empty() {
+				return Err(Error::NoPath(recipient.map(|r| r.0.clone())))
+			}
+			let mut rng = rand::thread_rng();
+			let n_start: usize = rng.gen_range(0..firsts.len());
+			let mut n: usize = n_start;
+			loop {
+				let first = &firsts[n];
+				let start = (&first.0, Some(&first.1));
+
+				match self.topology.random_path(start, recipient, count, num_hops) {
+					Ok(mut paths) => {
+						for path in paths.iter_mut() {
+							path.insert(0, (first.0, first.1));
+						}
+						return Ok(paths)
+					},
+					Err(e) => {
+						n += 1;
+						if n == firsts.len() {
+							n = 0
+						}
+						if n == n_start {
+							return Err(e)
+						}
+					},
+				}
+			}
+		}
 	}
 
 	fn cleanup(&mut self, now: Instant) {
@@ -784,9 +840,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 				},
 				Poll::Ready(ConnectionResult::Received(packet)) => {
 					all_pending = false;
-					if let Some(sphinx_id) = connection.mixnet_id() {
-						recv_packets.push((*sphinx_id, packet));
-					}
+					recv_packets.push((connection.mixnet_id().cloned(), packet));
 				},
 				Poll::Pending => (),
 			}
@@ -817,7 +871,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		}
 	}
 
-	fn import_packet(&mut self, peer: MixnetId, packet: Packet) -> bool {
+	fn import_packet(&mut self, peer: Option<MixnetId>, packet: Packet) -> bool {
 		match self.import_message(peer, packet) {
 			Ok(Some((message, kind))) => {
 				self.pending_events.push_back(MixnetEvent::Message(DecodedMessage {

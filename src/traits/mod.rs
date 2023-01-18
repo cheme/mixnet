@@ -39,7 +39,7 @@ pub trait ClonableSink: Sink<WorkerCommand, Error = SendError> + DynClone + Unpi
 impl<T> ClonableSink for T where T: Sink<WorkerCommand, Error = SendError> + DynClone + Unpin + Send {}
 
 /// Provide Configuration of mixnet.
-pub trait Configuration: Topology + Handshake + Unpin + Sized + Send + 'static {
+pub trait Configuration: Topology + Unpin + Sized + Send + 'static {
 	/// Do we need stats for each windows.
 	fn collect_windows_stats(&self) -> bool;
 
@@ -120,22 +120,6 @@ pub trait Topology: Sized {
 /// Two variant given other info will be shared.
 pub struct NewRoutingSet<'a> {
 	pub peers: &'a [(MixnetId, MixPublicKey, NetworkId)],
-}
-
-/// Handshake on peer connection.
-pub trait Handshake {
-	/// Handshake size expected.
-	fn handshake_size(&self) -> usize;
-
-	/// Check handshake payload and extract (or return from state)
-	/// peer id and public key.
-	fn check_handshake(&self, payload: &[u8], from: &NetworkId)
-		-> Option<(MixnetId, MixPublicKey)>;
-
-	/// On handshake, return handshake payload.
-	///
-	/// Return None if peer is filtered by network id.
-	fn handshake(&self, with: &NetworkId, public_key: &MixPublicKey) -> Option<Vec<u8>>;
 }
 
 /// No topology try direct connection.
@@ -227,29 +211,10 @@ impl Configuration for NoTopology {
 	fn peer_stats(&self, _: &PeerCount) {}
 }
 
-impl Handshake for NoTopology {
-	fn handshake_size(&self) -> usize {
-		32
-	}
-
-	fn check_handshake(
-		&self,
-		payload: &[u8],
-		from: &NetworkId,
-	) -> Option<(MixnetId, MixPublicKey)> {
-		let peer_id = crate::core::to_sphinx_id(from).ok()?;
-		let mut pk = [0u8; crate::core::PUBLIC_KEY_LEN];
-		pk.copy_from_slice(payload);
-		let pk = MixPublicKey::from(pk);
-		Some((peer_id, pk))
-	}
-
-	fn handshake(&self, _with: &NetworkId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
-		Some(public_key.to_bytes().to_vec())
-	}
-}
-
 /// Primitives needed from a network connection.
+///
+/// TODO consider removing the trait (only here to avoid intermodule
+/// dependencies).
 pub trait Connection: Unpin {
 	/// Is queue empty and connection ready for next message.
 	fn can_queue_send(&self) -> bool;

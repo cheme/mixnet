@@ -62,7 +62,6 @@ pub(crate) enum ConnectionResult {
 
 pub(crate) struct ManagedConnection<C> {
 	local_id: MixnetId,
-	local_public_key: MixPublicKey,
 	connection: C,
 	network_id: NetworkId,
 	kind: ConnectedKind, // TODO may be useless or at least some variants
@@ -108,7 +107,6 @@ pub(crate) struct ManagedConnection<C> {
 impl<C: Connection> ManagedConnection<C> {
 	pub fn new(
 		local_id: MixnetId,
-		local_public_key: MixPublicKey,
 		network_id: NetworkId,
 		peer_id: Option<MixnetId>,
 		connection: C,
@@ -126,7 +124,6 @@ impl<C: Connection> ManagedConnection<C> {
 
 		Self {
 			local_id,
-			local_public_key,
 			connection,
 			handshake_done_id: peer_id,
 			network_id,
@@ -246,10 +243,6 @@ impl<C: Connection> ManagedConnection<C> {
 		cx: &mut Context,
 		current_window: Wrapping<usize>,
 	) -> Poll<Result<Packet, ()>> {
-		if !self.kind.is_mixnet_routing() {
-			// this is actually unreachable but ignore it.
-			return Poll::Pending
-		}
 		loop {
 			return match self.connection.try_recv(cx) {
 				Poll::Ready(Ok(Some(packet))) => {
@@ -282,11 +275,6 @@ impl<C: Connection> ManagedConnection<C> {
 		_peers: &PeerCount,       // TODO rem param
 	) -> Result<(), crate::Error> {
 		if let Some(peer_id) = self.handshake_done_id.as_ref() {
-			if !(self.kind.routing_forward() || self.gracefull_nb_packet_send > 0) {
-				log::error!(target: "mixnet", "Dropping an injected queued packet, not routing to first hop {:?}.", self.kind);
-				return Err(crate::Error::NoPath(Some(*peer_id)))
-			}
-
 			if packet.injected_packet() {
 				// more priority
 				self.packet_queue_inject.push(packet);
@@ -299,6 +287,12 @@ impl<C: Connection> ManagedConnection<C> {
 
 				return Ok(())
 			}
+
+			if !(self.kind.routing_forward() || self.gracefull_nb_packet_send > 0) {
+				log::error!(target: "mixnet", "Dropping an injected queued packet, not routing to first hop {:?}.", self.kind);
+				return Err(crate::Error::NoPath(Some(*peer_id)))
+			}
+
 			let packet_per_window = packet_per_window * (100 + WINDOW_MARGIN_PERCENT) / 100;
 			if self.packet_queue.len() > packet_per_window {
 				log::error!(target: "mixnet", "Dropping packet, queue full: {:?}", self.network_id);
@@ -383,136 +377,133 @@ impl<C: Connection> ManagedConnection<C> {
 		cx: &mut Context,
 		window: &WindowInfo,
 	) -> Poll<Result<ConnectionResult, ()>> {
-		if let Some(peer_id) = self.handshake_done_id {
-			// routing
-			let send_limit = if self.gracefull_nb_packet_send > 0 {
-				window.current_packet_limit / 2
-			} else {
-				window.current_packet_limit
-			};
-			// Forward first.
-			while self.sent_in_window < send_limit {
-				match try_poll!(self.try_send_flushed(cx, true)) {
-					Some(true) => {
-						// Did send message
-						self.sent_in_window += 1;
-						if self.gracefull_nb_packet_send > 0 {
-							self.gracefull_nb_packet_send -= 1;
+		// routing
+		let send_limit = if self.gracefull_nb_packet_send > 0 {
+			window.current_packet_limit / 2
+		} else {
+			window.current_packet_limit
+		};
+		// Forward first.
+		while self.sent_in_window < send_limit {
+			match try_poll!(self.try_send_flushed(cx, true)) {
+				Some(true) => {
+					// Did send message
+					self.sent_in_window += 1;
+					if self.gracefull_nb_packet_send > 0 {
+						self.gracefull_nb_packet_send -= 1;
+						if self.gracefull_nb_packet_send == 0 &&
+							self.gracefull_nb_packet_receive == 0 &&
+							self.gracefull_disconnecting.is_some()
+						{
+							return Poll::Ready(Err(()))
+						}
+					}
+					break
+				},
+				Some(false) => {
+					// nothing in queue, get next.
+					if let Some(packet) = self.next_packet.take() {
+						if self.connection.can_queue_send() {
+							self.connection.queue_send(None, packet.0);
+							if let Some(stats) = self.stats.as_mut() {
+								stats.1 = Some(packet.1);
+							}
+						} else {
+							log::error!(target: "mixnet", "Queue should be flushed.");
+							if let Some((stats, _)) = self.stats.as_mut() {
+								stats.failure_packet(Some(packet.1));
+							}
+							self.next_packet = Some(packet);
+						}
+						continue
+					}
+					let deadline =
+						self.packet_queue.peek().map_or(false, |p| p.deadline <= window.last_now);
+					if deadline {
+						if let Some(packet) = self.packet_queue.pop() {
+							self.next_packet = Some((packet.data.into_vec(), packet.kind));
+						}
+					} else {
+						let deadline = self
+							.packet_queue_inject
+							.peek()
+							.map_or(false, |p| p.deadline <= window.last_now);
+						if deadline {
+							if let Some(packet) = self.packet_queue_inject.pop() {
+								self.next_packet = Some((packet.data.into_vec(), packet.kind));
+							}
+						}
+						if self.next_packet.is_none() && self.kind.routing_forward() {
+							if let Some(key) = self.public_key {
+								if let Some(peer_id) = self.handshake_done_id {
+									self.next_packet = crate::core::cover_message_to(&peer_id, key)
+										.map(|p| (p.into_vec(), PacketType::Cover));
+									if self.next_packet.is_none() {
+										log::error!(target: "mixnet", "Could not create cover for {:?}", self.network_id);
+										if let Some(stats) = self.stats.as_mut() {
+											stats.0.number_cover_send_failed += 1;
+										}
+									}
+								}
+							}
+						}
+						if self.next_packet.is_none() {
+							break
+						}
+					}
+				},
+				None => break,
+			}
+		}
+
+		// Limit reception.
+		let current = if self.kind.routing_receive() { window.current_packet_limit } else { 0 };
+		let current = if self.gracefull_nb_packet_receive > 0 {
+			window.current_packet_limit / 2
+		} else {
+			current
+		};
+		let can_receive = self.recv_in_window < current;
+		if self.receive_buffer.is_some() || can_receive {
+			loop {
+				match self.try_recv_packet(cx, window.current) {
+					Poll::Ready(Ok(packet)) => {
+						self.recv_in_window += 1;
+						if self.gracefull_nb_packet_receive > 0 {
+							self.gracefull_nb_packet_receive -= 1;
 							if self.gracefull_nb_packet_send == 0 &&
 								self.gracefull_nb_packet_receive == 0 &&
 								self.gracefull_disconnecting.is_some()
 							{
+								self.gracefull_disconnecting = Some(window.last_now);
+							}
+						}
+
+						if let Some((buf, underbuf, limit)) = self.receive_buffer.as_mut() {
+							buf.push_back(packet);
+							if buf.len() > *limit + *underbuf {
+								log::warn!(target: "mixnet", "Disconnecting, received too many messages");
 								return Poll::Ready(Err(()))
 							}
-						}
-						break
-					},
-					Some(false) => {
-						// nothing in queue, get next.
-						if let Some(packet) = self.next_packet.take() {
-							if self.connection.can_queue_send() {
-								self.connection.queue_send(None, packet.0);
-								if let Some(stats) = self.stats.as_mut() {
-									stats.1 = Some(packet.1);
-								}
-							} else {
-								log::error!(target: "mixnet", "Queue should be flushed.");
-								if let Some((stats, _)) = self.stats.as_mut() {
-									stats.failure_packet(Some(packet.1));
-								}
-								self.next_packet = Some(packet);
-							}
-							continue
-						}
-						let deadline = self
-							.packet_queue
-							.peek()
-							.map_or(false, |p| p.deadline <= window.last_now);
-						if deadline {
-							if let Some(packet) = self.packet_queue.pop() {
-								self.next_packet = Some((packet.data.into_vec(), packet.kind));
-							}
-						} else if let Some(key) = self.public_key {
-							let deadline = self
-								.packet_queue_inject
-								.peek()
-								.map_or(false, |p| p.deadline <= window.last_now);
-							if deadline {
-								if let Some(packet) = self.packet_queue_inject.pop() {
-									self.next_packet = Some((packet.data.into_vec(), packet.kind));
-								}
-							}
-							if self.next_packet.is_none() && self.kind.routing_forward() {
-								self.next_packet = crate::core::cover_message_to(&peer_id, key)
-									.map(|p| (p.into_vec(), PacketType::Cover));
-								if self.next_packet.is_none() {
-									log::error!(target: "mixnet", "Could not create cover for {:?}", self.network_id);
-									if let Some(stats) = self.stats.as_mut() {
-										stats.0.number_cover_send_failed += 1;
-									}
-								}
-							}
-							if self.next_packet.is_none() {
-								break
-							}
+						} else {
+							return Poll::Ready(Ok(ConnectionResult::Received(packet)))
 						}
 					},
-					None => break,
+					Poll::Ready(Err(())) => return Poll::Ready(Err(())),
+					Poll::Pending => break,
 				}
 			}
 
-			// Limit reception.
-			let current = if self.kind.routing_receive() { window.current_packet_limit } else { 0 };
-			let current = if self.gracefull_nb_packet_receive > 0 {
-				window.current_packet_limit / 2
-			} else {
-				current
-			};
-			let can_receive = self.recv_in_window < current;
-			if self.receive_buffer.is_some() || can_receive {
-				loop {
-					match self.try_recv_packet(cx, window.current) {
-						Poll::Ready(Ok(packet)) => {
-							self.recv_in_window += 1;
-							if self.gracefull_nb_packet_receive > 0 {
-								self.gracefull_nb_packet_receive -= 1;
-								if self.gracefull_nb_packet_send == 0 &&
-									self.gracefull_nb_packet_receive == 0 &&
-									self.gracefull_disconnecting.is_some()
-								{
-									self.gracefull_disconnecting = Some(window.last_now);
-								}
-							}
-
-							if let Some((buf, underbuf, limit)) = self.receive_buffer.as_mut() {
-								buf.push_back(packet);
-								if buf.len() > *limit + *underbuf {
-									log::warn!(target: "mixnet", "Disconnecting, received too many messages");
-									return Poll::Ready(Err(()))
-								}
-							} else {
-								return Poll::Ready(Ok(ConnectionResult::Received(packet)))
-							}
-						},
-						Poll::Ready(Err(())) => return Poll::Ready(Err(())),
-						Poll::Pending => break,
-					}
-				}
-
-				if can_receive {
-					if let Some((buf, _underbuf, _limit)) = self.receive_buffer.as_mut() {
-						if let Some(mess) = buf.pop_front() {
-							return Poll::Ready(Ok(ConnectionResult::Received(mess)))
-						}
+			if can_receive {
+				if let Some((buf, _underbuf, _limit)) = self.receive_buffer.as_mut() {
+					if let Some(mess) = buf.pop_front() {
+						return Poll::Ready(Ok(ConnectionResult::Received(mess)))
 					}
 				}
 			}
-
-			Poll::Pending
-		} else {
-			log::trace!(target: "mixnet", "No sphinx id, dropping.");
-			Poll::Ready(Err(()))
 		}
+
+		Poll::Pending
 	}
 
 	fn update_window(&mut self, window: &WindowInfo) {

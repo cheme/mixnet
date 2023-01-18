@@ -24,8 +24,7 @@ mod common;
 
 use ambassador::Delegate;
 use common::{
-	new_routing_set, send_messages, wait_on_connections, wait_on_messages, SendConf,
-	SimpleHandshake, TestConfig,
+	new_routing_set, send_messages, wait_on_connections, wait_on_messages, SendConf, TestConfig,
 };
 use libp2p_core::PeerId;
 use mixnet::{
@@ -67,11 +66,11 @@ impl TopologyConfig for NotDistributed {
 #[derive(Delegate)]
 #[delegate(Topology)]
 struct NotDistributed {
-	inner: SimpleHandshake<TopologyHashTable<Self>>,
+	inner: TopologyHashTable<Self>,
 }
 
-impl From<SimpleHandshake<TopologyHashTable<NotDistributed>>> for NotDistributed {
-	fn from(inner: SimpleHandshake<TopologyHashTable<NotDistributed>>) -> Self {
+impl From<TopologyHashTable<NotDistributed>> for NotDistributed {
+	fn from(inner: TopologyHashTable<NotDistributed>) -> Self {
 		NotDistributed { inner }
 	}
 }
@@ -84,20 +83,6 @@ impl mixnet::traits::Configuration for NotDistributed {
 	fn window_stats(&self, _stats: &mixnet::WindowStats, _: &PeerCount) {}
 
 	fn peer_stats(&self, _: &PeerCount) {}
-}
-
-impl mixnet::traits::Handshake for NotDistributed {
-	fn handshake_size(&self) -> usize {
-		self.inner.handshake_size()
-	}
-
-	fn check_handshake(&self, payload: &[u8], from: &PeerId) -> Option<(MixnetId, MixPublicKey)> {
-		self.inner.check_handshake(payload, from)
-	}
-
-	fn handshake(&self, with: &PeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
-		self.inner.handshake(with, public_key)
-	}
 }
 
 fn test_messages(conf: TestConfig) {
@@ -141,26 +126,18 @@ fn test_messages(conf: TestConfig) {
 	let executor = log_unwrap!(futures::executor::ThreadPool::new());
 	let expect_all_connected = false;
 	let make_topo = move |p: usize,
-	                      network_id: PeerId,
+	                      _network_id: PeerId,
 	                      nodes: &[(MixnetId, MixPublicKey, NetworkId)],
-	                      secrets: &[(MixSecretKey, ed25519_zebra::SigningKey)],
-	                      config: &mixnet::Config| {
+	                      _secrets: &[(MixSecretKey, ed25519_zebra::SigningKey)],
+	                      _config: &mixnet::Config| {
 		let mut topo = TopologyHashTable::new(
 			nodes[p].0,
 			nodes[p].1,
 			NotDistributed::DEFAULT_PARAMETERS.clone(),
 		);
 		topo.handle_new_routing_set(NewRoutingSet { peers: &nodes[..num_peers] });
-		let mix_secret_key = secrets[p].1;
-		let mix_public_key: ed25519_zebra::VerificationKey = (&mix_secret_key).into();
 
-		let inner = SimpleHandshake {
-			local_id: Some(config.local_id),
-			local_network_id: Some(network_id),
-			topo,
-			mix_secret_key: Some(Arc::new((mix_secret_key, mix_public_key))),
-		};
-		inner.into()
+		topo.into()
 	};
 
 	let (handles, _) = common::spawn_swarms(
@@ -253,7 +230,8 @@ fn fragmented_messages_with_surb() {
 	})
 }
 
-// #[test]
+// #[test] TODO change mixnet id to send back over
+// netwok id
 fn from_external_with_surb() {
 	test_messages(TestConfig {
 		num_peers: 6,
@@ -294,7 +272,8 @@ fn surb_and_layer_local() {
 	}
 }
 
-//#[test]
+// #[test] TODO change mixnet id to send back over
+// netwok id
 fn surb_and_layer_external() {
 	test_messages(TestConfig {
 		num_peers: 20,
@@ -358,10 +337,10 @@ fn test_change_routing_set(conf: TestConfig) {
 
 	let disp = std::sync::atomic::AtomicBool::new(true);
 	let make_topo = move |p: usize,
-	                      network_id: PeerId,
+	                      _network_id: PeerId,
 	                      nodes: &[(MixnetId, MixPublicKey, NetworkId)],
-	                      secrets: &[(MixSecretKey, ed25519_zebra::SigningKey)],
-	                      config: &mixnet::Config| {
+	                      _secrets: &[(MixSecretKey, ed25519_zebra::SigningKey)],
+	                      _config: &mixnet::Config| {
 		if disp.swap(false, std::sync::atomic::Ordering::Relaxed) {
 			log::trace!(target: "mixnet_test", "Topo_peers:");
 			for p in nodes {
@@ -374,16 +353,8 @@ fn test_change_routing_set(conf: TestConfig) {
 			NotDistributed::DEFAULT_PARAMETERS.clone(),
 		);
 		topo.handle_new_routing_set(NewRoutingSet { peers: &nodes[set_topo.clone()] });
-		let mix_secret_key = secrets[p].1;
-		let mix_public_key: ed25519_zebra::VerificationKey = (&mix_secret_key).into();
 
-		let inner = SimpleHandshake {
-			local_id: Some(config.local_id),
-			local_network_id: Some(network_id),
-			topo,
-			mix_secret_key: Some(Arc::new((mix_secret_key, mix_public_key))),
-		};
-		NotDistributed { inner }
+		NotDistributed { inner: topo }
 	};
 
 	let (handles, initial_con) = common::spawn_swarms(

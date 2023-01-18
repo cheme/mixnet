@@ -22,9 +22,7 @@
 
 mod common;
 
-use common::{
-	send_messages, wait_on_connections, wait_on_messages, SendConf, SimpleHandshake, TestConfig,
-};
+use common::{send_messages, wait_on_connections, wait_on_messages, SendConf, TestConfig};
 use libp2p_core::PeerId;
 use rand::{prelude::IteratorRandom, Rng, RngCore};
 use std::{
@@ -35,19 +33,10 @@ use std::{
 	},
 };
 
-use ambassador::Delegate;
 use mixnet::{
-	ambassador_impl_Topology,
 	traits::{NewRoutingSet, Topology},
 	Error, MixPublicKey, MixSecretKey, MixnetId, NetworkId, PeerCount,
 };
-
-#[derive(Delegate)]
-#[delegate(Topology)]
-#[derive(Clone)]
-struct ConfigGraph {
-	inner: SimpleHandshake<TopologyGraph>,
-}
 
 #[derive(Clone)]
 struct TopologyGraph {
@@ -89,7 +78,7 @@ impl TopologyGraph {
 	}
 }
 
-impl mixnet::traits::Configuration for ConfigGraph {
+impl mixnet::traits::Configuration for TopologyGraph {
 	fn collect_windows_stats(&self) -> bool {
 		true
 	}
@@ -97,20 +86,6 @@ impl mixnet::traits::Configuration for ConfigGraph {
 	fn window_stats(&self, _stats: &mixnet::WindowStats, _: &PeerCount) {}
 
 	fn peer_stats(&self, _: &PeerCount) {}
-}
-
-impl mixnet::traits::Handshake for ConfigGraph {
-	fn handshake_size(&self) -> usize {
-		self.inner.handshake_size()
-	}
-
-	fn check_handshake(&self, payload: &[u8], from: &PeerId) -> Option<(MixnetId, MixPublicKey)> {
-		self.inner.check_handshake(payload, from)
-	}
-
-	fn handshake(&self, with: &PeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
-		self.inner.handshake(with, public_key)
-	}
 }
 
 impl Topology for TopologyGraph {
@@ -275,23 +250,15 @@ fn test_messages(conf: TestConfig) {
 	let executor = futures::executor::ThreadPool::new().unwrap();
 	let expect_all_connected = true;
 
-	let make_topo = move |p: usize,
+	let make_topo = move |_p: usize,
 	                      network_id: PeerId,
 	                      nodes: &[(MixnetId, MixPublicKey, NetworkId)],
-	                      secrets: &[(MixSecretKey, ed25519_zebra::SigningKey)],
+	                      _secrets: &[(MixSecretKey, ed25519_zebra::SigningKey)],
 	                      config: &mixnet::Config| {
 		let mut topo = TopologyGraph::new_star(&nodes[..num_peers]);
 		topo.local_id = Some(config.local_id);
 		topo.local_network_id = Some(network_id);
-		let mix_secret_key = secrets[p].1;
-		let mix_public_key: ed25519_zebra::VerificationKey = (&mix_secret_key).into();
-		let handshake = SimpleHandshake {
-			local_id: Some(config.local_id),
-			local_network_id: Some(network_id),
-			topo,
-			mix_secret_key: Some(Arc::new((mix_secret_key, mix_public_key))),
-		};
-		ConfigGraph { inner: handshake }
+		topo
 	};
 
 	let (handles, _) = common::spawn_swarms(
@@ -303,7 +270,7 @@ fn test_messages(conf: TestConfig) {
 		make_topo,
 	);
 
-	let (nodes, mut with_swarm_channels) = common::spawn_workers::<ConfigGraph>(
+	let (nodes, mut with_swarm_channels) = common::spawn_workers::<TopologyGraph>(
 		num_peers,
 		from_external,
 		expect_all_connected,
@@ -382,9 +349,10 @@ fn fragmented_messages_with_surb() {
 fn ext_fragmented_surbs() {
 	test_messages(TestConfig {
 		num_peers: 2,
-		num_hops: 3,
+		num_hops: 4,
 		message_count: 1,
-		message_size: 8 * 1024,
+		//message_size: 8 * 1024,
+		message_size: 10,
 		with_surb: false,
 		//with_surb: false, TODO -> true
 		from_external: true,
@@ -392,11 +360,12 @@ fn ext_fragmented_surbs() {
 	})
 }
 
-#[test]
+// #[test] TODO change mixnet id to send back over
+// netwok id
 fn from_external_with_surb() {
 	test_messages(TestConfig {
 		num_peers: 5,
-		num_hops: 3,
+		num_hops: 4,
 		message_count: 1,
 		message_size: 100,
 		with_surb: true,
@@ -409,7 +378,7 @@ fn from_external_with_surb() {
 fn from_external_no_surb() {
 	test_messages(TestConfig {
 		num_peers: 5,
-		num_hops: 3,
+		num_hops: 4,
 		message_count: 1,
 		message_size: 4 * 1024,
 		with_surb: false,

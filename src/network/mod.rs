@@ -158,7 +158,7 @@ impl NetworkBehaviour for MixnetBehaviour {
 			self.notify_queue.push_back((*peer_id, *con_id));
 			self.connected.insert(*peer_id, *con_id);
 		} else {
-			log::trace!(target: "mixnet", "Inject already here TODO rerun handle in this case");
+			log::trace!(target: "mixnet", "Inject already here TODO rerun handle in this case?");
 		}
 	}
 
