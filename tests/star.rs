@@ -175,10 +175,6 @@ impl Topology for TopologyGraph {
 		}
 	}
 
-	fn accept_peer(&self, _peer_id: &MixnetId, _peers: &PeerCount) -> bool {
-		self.local_id.is_some()
-	}
-
 	fn handle_new_routing_set(&mut self, _set: NewRoutingSet) {
 		// static set in these tests
 	}

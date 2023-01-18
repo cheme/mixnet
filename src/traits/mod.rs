@@ -105,9 +105,6 @@ pub trait Topology: Sized {
 	/// be costless when no change occurs.
 	fn changed_route(&mut self) -> Option<BTreeSet<MixnetId>>;
 
-	/// Is peer allowed to connect to our node.
-	fn accept_peer(&self, peer_id: &MixnetId, peers: &PeerCount) -> bool;
-
 	/// A new static routing set was globally defined.
 	fn handle_new_routing_set(&mut self, set: NewRoutingSet);
 
@@ -184,10 +181,6 @@ impl Topology for NoTopology {
 
 	fn disconnected(&mut self, id: &MixnetId) {
 		self.connected_peers.remove(id);
-	}
-
-	fn accept_peer(&self, _: &MixnetId, _: &PeerCount) -> bool {
-		true
 	}
 
 	fn changed_route(&mut self) -> Option<BTreeSet<MixnetId>> {

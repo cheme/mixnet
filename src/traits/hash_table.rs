@@ -265,18 +265,6 @@ impl<C: Configuration> Topology for TopologyHashTable<C> {
 		self.add_disconnected_peer(peer_id);
 	}
 
-	fn accept_peer(&self, peer_id: &MixnetId, peers: &PeerCount) -> bool {
-		if self.routing {
-			self.routing_to(peer_id, &self.local_id) ||
-				self.routing_to(&self.local_id, peer_id) ||
-				(peers.nb_connected_external < self.params.max_external.unwrap_or(usize::MAX))
-		} else {
-			// Could use a higher limit when not routing, but would be more `when not suceptible
-			// to be in the routing set` which we don't know but can configure.
-			peers.nb_connected_external < self.params.max_external.unwrap_or(usize::MAX)
-		}
-	}
-
 	fn handle_new_routing_set(&mut self, set: NewRoutingSet) {
 		self.handle_new_routing_set_start(set.peers.iter().map(|k| &k.0), None);
 		self.refresh_static_routing_tables(set.peers);
