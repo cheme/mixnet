@@ -56,6 +56,9 @@ pub struct MixnetBehaviour {
 	mixnet_worker_stream: StreamFromWorker,
 	// avoid two connections from a single peer.
 	connected: HashMap<NetworkId, ConnectionId>,
+	// when disconnected don't reconnect immediately
+	// TODO may exist this mechanism at libp2p level
+	disconnected: HashMap<NetworkId, std::time::Instant>,
 	// connection handler notify queue
 	notify_queue: VecDeque<(NetworkId, ConnectionId)>,
 }
@@ -68,6 +71,7 @@ impl MixnetBehaviour {
 			mixnet_worker_stream: worker_out,
 			notify_queue: Default::default(),
 			connected: Default::default(),
+			disconnected: Default::default(),
 		}
 	}
 }
@@ -154,6 +158,13 @@ impl NetworkBehaviour for MixnetBehaviour {
 		_: Option<&Vec<Multiaddr>>,
 		_: usize,
 	) {
+		if let Some(until) = self.disconnected.get(peer_id) {
+			if until > &std::time::Instant::now() {
+				log::trace!(target: "mixnet", "Not propagating connection for peer_id, in disconnected period.");
+				return
+			}
+			self.disconnected.remove(peer_id);
+		}
 		if !self.connected.contains_key(peer_id) {
 			self.notify_queue.push_back((*peer_id, *con_id));
 			self.connected.insert(*peer_id, *con_id);
@@ -203,8 +214,11 @@ impl NetworkBehaviour for MixnetBehaviour {
 
 		match self.mixnet_worker_stream.poll_next_unpin(cx) {
 			Poll::Ready(Some(out)) => match out {
-				MixnetToBehaviorEvent::Disconnected(network_id) => {
+				MixnetToBehaviorEvent::Disconnected(network_id, until) => {
 					if let Some(con_id) = self.connected.remove(&network_id) {
+						if let Some(until) = until {
+							self.disconnected.insert(network_id, until);
+						}
 						Poll::Ready(NetworkBehaviourAction::CloseConnection {
 							peer_id: network_id,
 							connection: CloseConnection::One(con_id),

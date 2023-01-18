@@ -64,13 +64,9 @@ pub(crate) struct ManagedConnection<C> {
 	local_id: MixnetId,
 	connection: C,
 	network_id: NetworkId,
-	kind: ConnectedKind, // TODO may be useless or at least some variants
+	pub(crate) kind: ConnectedKind, // TODO may be useless or at least some variants
 
-	// TODO all handshake here in an enum (still a bit redundant with `kind`).
-	// TODO rename to peer_id
-	handshake_done_id: Option<MixnetId>,
-	handshake_sent: bool,
-	handshake_received: bool,
+	peer_id: Option<MixnetId>,
 	public_key: Option<MixPublicKey>, // public key is only needed for creating cover messages.
 	// Real messages queue, sorted by deadline (`QueuedPacket` is ord desc by deadline).
 	packet_queue: BinaryHeap<QueuedPacket>,
@@ -125,15 +121,13 @@ impl<C: Connection> ManagedConnection<C> {
 		Self {
 			local_id,
 			connection,
-			handshake_done_id: peer_id,
+			peer_id,
 			network_id,
 			kind,
 			read_timeout: Delay::new(READ_TIMEOUT),
 			next_packet: None,
 			current_window,
 			public_key: None,
-			handshake_sent: false,
-			handshake_received: false,
 			sent_in_window: 0,
 			recv_in_window: 0,
 			packet_queue: Default::default(),
@@ -150,53 +144,15 @@ impl<C: Connection> ManagedConnection<C> {
 		&mut self.connection
 	}
 
-	pub(super) fn update_kind(
-		&mut self,
-		peers: &mut PeerCount,
-		topology: &mut impl Configuration,
-		window: &WindowInfo,
-	) {
+	pub(super) fn update_kind(&mut self, peers: &mut PeerCount, topology: &mut impl Configuration) {
 		let old_kind = self.kind;
 		self.add_peer(topology, peers);
 		peers.remove_peer(old_kind);
 		topology.peer_stats(peers);
-
-		// gracefull handling
-		let disco = matches!(self.kind, ConnectedKind::Disconnected);
-		// TODO include consumer here?
-		// TODO what if switching one but not the other: should have gracefull
-		// forward and gracefull backward ??
-		let forward = old_kind.routing_forward() != self.kind.routing_forward();
-		let receive = old_kind.routing_receive() != self.kind.routing_receive();
-		if receive || forward {
-			if self.gracefull_nb_packet_send > 0 || self.gracefull_nb_packet_receive > 0 {
-				// do not reenter gracefull period ensuring an equilibrium fro constant number
-				// of peers.
-				return
-			}
-			if let Some((period, number_message_graceful_period)) =
-				window.graceful_topology_change_period
-			{
-				if forward {
-					self.gracefull_nb_packet_send = number_message_graceful_period;
-				}
-				if receive {
-					self.gracefull_nb_packet_receive = number_message_graceful_period;
-				}
-				if disco {
-					let period_ms = period.as_millis();
-					// could be using its own margins
-					let period_ms = period_ms * (100 + WINDOW_MARGIN_PERCENT as u128) / 100;
-					let period = Duration::from_millis(period_ms as u64);
-					let deadline = window.last_now + period;
-					self.gracefull_disconnecting = Some(deadline);
-				}
-			}
-		}
 	}
 
 	pub fn mixnet_id(&self) -> Option<&MixnetId> {
-		self.handshake_done_id.as_ref()
+		self.peer_id.as_ref()
 	}
 
 	pub fn network_id(&self) -> NetworkId {
@@ -206,7 +162,7 @@ impl<C: Connection> ManagedConnection<C> {
 	// TODO rename as it can be existing peer that change kind
 	// actually in a single place: remove function
 	fn add_peer(&mut self, topology: &mut impl Configuration, peer_counts: &mut PeerCount) {
-		if let Some(peer) = self.handshake_done_id.as_ref() {
+		if let Some(peer) = self.peer_id.as_ref() {
 			self.kind = peer_counts.add_peer(&self.local_id, peer, topology);
 		} else {
 			self.kind = ConnectedKind::External;
@@ -274,7 +230,7 @@ impl<C: Connection> ManagedConnection<C> {
 		topology: &impl Topology, // TODO rem param
 		_peers: &PeerCount,       // TODO rem param
 	) -> Result<(), crate::Error> {
-		if let Some(peer_id) = self.handshake_done_id.as_ref() {
+		if let Some(peer_id) = self.peer_id.as_ref() {
 			if packet.injected_packet() {
 				// more priority
 				self.packet_queue_inject.push(packet);
@@ -330,9 +286,9 @@ impl<C: Connection> ManagedConnection<C> {
 		topology: &mut impl Configuration,
 		peers: &mut PeerCount,
 	) -> Poll<ConnectionResult> {
-		peers.remove_peer(self.set_disconnected_kind());
+		peers.remove_peer(self.kind);
 		topology.peer_stats(peers);
-		Poll::Ready(ConnectionResult::Broken(self.handshake_done_id))
+		Poll::Ready(ConnectionResult::Broken(self.peer_id))
 	}
 
 	pub(super) fn poll(
@@ -435,7 +391,7 @@ impl<C: Connection> ManagedConnection<C> {
 						}
 						if self.next_packet.is_none() && self.kind.routing_forward() {
 							if let Some(key) = self.public_key {
-								if let Some(peer_id) = self.handshake_done_id {
+								if let Some(peer_id) = self.peer_id {
 									self.next_packet = crate::core::cover_message_to(&peer_id, key)
 										.map(|p| (p.into_vec(), PacketType::Cover));
 									if self.next_packet.is_none() {
@@ -546,14 +502,6 @@ impl<C: Connection> ManagedConnection<C> {
 
 			&mut stats.0
 		})
-	}
-
-	pub(super) fn set_disconnected_kind(&mut self) -> ConnectedKind {
-		let kind = self.kind;
-		self.handshake_sent = false;
-		self.handshake_received = false;
-		self.kind = ConnectedKind::Disconnected;
-		kind
 	}
 }
 

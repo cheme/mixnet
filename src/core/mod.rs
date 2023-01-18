@@ -57,6 +57,9 @@ pub type MixPublicKey = sphinx::PublicKey;
 /// Mixnet peer DH static secret key.
 pub type MixSecretKey = sphinx::StaticSecret;
 
+// TODO should be configurable.
+pub const DISCONNECTED_DURATION: Duration = Duration::from_secs(10);
+
 /// Size of a mixnet packet.
 pub const PACKET_SIZE: usize = sphinx::OVERHEAD_SIZE + fragment::FRAGMENT_PACKET_SIZE;
 
@@ -70,7 +73,7 @@ pub struct TransmitInfo {
 
 /// Status of the connection with a given peer.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
-enum ConnectedKind {
+pub(crate) enum ConnectedKind {
 	// We and connected peer are part of mixnet topology,
 	// a constant bandwidth from us to the peer is needed.
 	RoutingForward,
@@ -84,30 +87,20 @@ enum ConnectedKind {
 	External,
 	// Node is routing, but unconnected to us.
 	ExternalRouting,
-	// No connection, keeping information for a later connect.
-	Disconnected,
 }
 
 impl ConnectedKind {
-	// At this point do not accept mixnet protocol message, but only
-	// raw sphinx messages.
-	fn is_mixnet_routing(self) -> bool {
-		matches!(
-			self,
-			ConnectedKind::RoutingForward |
-				ConnectedKind::RoutingReceive |
-				ConnectedKind::RoutingReceiveForward
-		)
-	}
-
 	fn routing_forward(self) -> bool {
 		matches!(self, ConnectedKind::RoutingForward | ConnectedKind::RoutingReceiveForward)
 	}
 
 	fn routing_receive(self) -> bool {
-		true
-		//matches!(self, ConnectedKind::RoutingReceive | ConnectedKind::RoutingReceiveForward |
-		// ConnectedKind::External)
+		matches!(
+			self,
+			ConnectedKind::RoutingReceive |
+				ConnectedKind::RoutingReceiveForward |
+				ConnectedKind::External
+		)
 	}
 }
 
@@ -147,7 +140,8 @@ impl Packet {
 pub enum MixnetEvent {
 	/// A new peer has connected.
 	Connected(NetworkId, Option<MixnetId>),
-	Disconnected(Vec<(NetworkId, Option<MixnetId>)>),
+	/// List of disconnected peers.
+	Disconnected(Vec<(NetworkId, Option<MixnetId>, Option<Instant>)>),
 	/// A message has reached us.
 	Message(DecodedMessage),
 	/// Shutdown signal.
@@ -291,7 +285,6 @@ pub struct Mixnet<T, C> {
 /// Mixnet window current state.
 pub struct WindowInfo {
 	packet_per_window: usize,
-	graceful_topology_change_period: Option<(Duration, usize)>,
 
 	current_start: Instant,
 	current: Wrapping<usize>,
@@ -321,15 +314,6 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 
 		let now = Instant::now();
 		let stats = topology.collect_windows_stats().then(WindowStats::default);
-		let graceful_topology_change_period = (config.graceful_topology_change_period_ms != 0)
-			.then(|| {
-				let nb_packet =
-					config.graceful_topology_change_period_ms * 1_000_000 / packet_duration_nanos;
-				(
-					Duration::from_millis(config.graceful_topology_change_period_ms as u64),
-					nb_packet as usize,
-				)
-			});
 		let receive_buffer = config
 			.receive_margin_ms
 			.map(|size_ms| (size_ms * 1_000_000 / packet_duration_nanos) as usize);
@@ -356,7 +340,6 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			window_size,
 			window: WindowInfo {
 				packet_per_window,
-				graceful_topology_change_period,
 
 				current_start: now,
 				last_now: now,
@@ -368,35 +351,8 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		}
 	}
 
-	pub fn restart(
-		&mut self,
-		new_id: Option<crate::MixnetId>,
-		new_keys: Option<(MixPublicKey, crate::MixSecretKey)>,
-	) {
-		if let Some(id) = new_id {
-			self.local_id = id;
-		}
-		if let Some((pub_key, priv_key)) = new_keys {
-			self.public = pub_key;
-			self.secret = priv_key;
-		}
-		// disconnect all (need a new handshake).
-		for connection in std::mem::take(&mut self.connected_peers).into_iter() {
-			if let Some(mut connection) = connection {
-				self.peer_counts.remove_peer(connection.set_disconnected_kind());
-				if let Some(mix_id) = connection.mixnet_id() {
-					self.routing_peers_index.remove(mix_id);
-					self.topology.disconnected(mix_id);
-				}
-			}
-		}
-		self.polling_random.clear();
-		self.connected_peers_index.clear();
-		self.topology.peer_stats(&self.peer_counts);
-	}
-
 	pub fn insert_connection(&mut self, network_id: NetworkId, connection: C) {
-		if let Some(peer_id) = self.remove_connected_peer(&network_id, false) {
+		if let Some(peer_id) = self.remove_connected_peer(&network_id, false, None) {
 			log::warn!(target: "mixnet", "Removing old connection with {:?}, on handshake restart", peer_id);
 		}
 		let peer_id = self.topology.get_mixnet_id(&network_id);
@@ -633,7 +589,9 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			Ok(Unwrapped::Forward((next_id, delay, packet))) => {
 				// See if we can forward the message
 				log::debug!(target: "mixnet", "Forward message from {:?} to {:?}", peer_id, next_id);
-				let kind = if self.window.stats.is_some() && peer_id.as_ref().map(|id| !self.topology.can_route(id)).unwrap_or(true) {
+				let kind = if self.window.stats.is_some() &&
+					peer_id.as_ref().map(|id| !self.topology.can_route(id)).unwrap_or(true)
+				{
 					PacketType::ForwardExternal
 				} else {
 					PacketType::Forward
@@ -645,19 +603,30 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 	}
 
 	/// Should be called when a peer is disconnected.
-	pub fn remove_connected_peer(&mut self, id: &NetworkId, with_event: bool) -> Option<MixnetId> {
+	pub fn remove_connected_peer(
+		&mut self,
+		id: &NetworkId,
+		with_event: bool,
+		until: Option<&Instant>,
+	) -> Option<MixnetId> {
 		let mix_id = self.connected_peers_index.remove(id).and_then(|ix| {
 			self.connected_peers.get_mut(ix).and_then(|c| {
-				c.take().and_then(|mut c| {
-					self.peer_counts.remove_peer(c.set_disconnected_kind());
+				c.take().and_then(|c| {
+					self.peer_counts.remove_peer(c.kind);
 					c.mixnet_id().cloned()
 				})
 			})
 		});
+		if let Some(mix_id) = &mix_id {
+			self.routing_peers_index.remove(mix_id);
+		}
 
 		if with_event {
-			self.pending_events
-				.push_back(MixnetEvent::Disconnected(vec![(*id, mix_id.clone())]));
+			self.pending_events.push_back(MixnetEvent::Disconnected(vec![(
+				*id,
+				mix_id.clone(),
+				until.cloned(),
+			)]));
 		}
 
 		if let Some(mix_id) = mix_id {
@@ -756,7 +725,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 					.get(&peer_id)
 					.and_then(|ix| self.connected_peers.get_mut(*ix).and_then(Option::as_mut))
 				{
-					connection.update_kind(&mut self.peer_counts, &mut self.topology, &self.window);
+					connection.update_kind(&mut self.peer_counts, &mut self.topology);
 				}
 			}
 		}
@@ -836,7 +805,8 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			};
 			match connection.poll(cx, &self.window, &mut self.topology, &mut self.peer_counts) {
 				Poll::Ready(ConnectionResult::Broken(mixnet_id)) => {
-					disconnected.push((connection.network_id(), mixnet_id));
+					let until = Some(self.window.last_now + DISCONNECTED_DURATION);
+					disconnected.push((connection.network_id(), mixnet_id, until));
 				},
 				Poll::Ready(ConnectionResult::Received(packet)) => {
 					all_pending = false;
@@ -856,9 +826,9 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		}
 
 		if !disconnected.is_empty() {
-			for (peer, from) in disconnected.iter() {
+			for (peer, from, until) in disconnected.iter() {
 				log::trace!(target: "mixnet", "Disconnecting peer {:?} from {:?}", from, self.local_id);
-				self.remove_connected_peer(peer, true);
+				self.remove_connected_peer(peer, true, until.as_ref());
 			}
 
 			return Poll::Ready(MixnetEvent::Disconnected(disconnected))
@@ -1164,7 +1134,6 @@ impl PeerCount {
 				self.nb_connected_forward_routing -= 1;
 				self.nb_connected_receive_routing -= 1;
 			},
-			ConnectedKind::Disconnected => (),
 		}
 	}
 }

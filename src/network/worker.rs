@@ -77,14 +77,6 @@ impl<T: Configuration> MixnetWorker<T> {
 		MixnetWorker { mixnet, worker_in, worker_out, hits: budget, budget }
 	}
 
-	pub fn restart(
-		&mut self,
-		new_id: Option<MixnetId>,
-		new_keys: Option<(MixPublicKey, crate::MixSecretKey)>,
-	) {
-		self.mixnet.restart(new_id, new_keys);
-	}
-
 	/// Return false on shutdown.
 	pub fn poll(&mut self, cx: &mut Context) -> Poll<MixnetEvent> {
 		loop {
@@ -103,7 +95,18 @@ impl<T: Configuration> MixnetWorker<T> {
 			match self.mixnet.poll_unpin(cx) {
 				Poll::Pending => return Poll::Pending,
 				Poll::Ready(MixnetEvent::None) => (),
-				Poll::Ready(event) => return Poll::Ready(event),
+				Poll::Ready(event) => {
+					if let MixnetEvent::Disconnected(disco) = &event {
+						for (disco, _, until) in disco.iter() {
+							if let Err(e) = self.worker_out.start_send_unpin(
+								MixnetToBehaviorEvent::Disconnected(*disco, until.clone()),
+							) {
+								log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
+							}
+						}
+					}
+					return Poll::Ready(event)
+				},
 			}
 
 			self.hits -= 1;
@@ -167,8 +170,11 @@ impl<T: Configuration> MixnetWorker<T> {
 
 	fn disconnect_peer(&mut self, peer: &NetworkId) {
 		log::trace!(target: "mixnet", "Disconnecting peer {:?}", peer);
-		let _ = self.mixnet.remove_connected_peer(peer, true);
-		if let Err(e) = self.worker_out.start_send_unpin(MixnetToBehaviorEvent::Disconnected(*peer))
+		let _ = self.mixnet.remove_connected_peer(peer, true, None);
+
+		if let Err(e) = self
+			.worker_out
+			.start_send_unpin(MixnetToBehaviorEvent::Disconnected(*peer, None))
 		{
 			log::error!(target: "mixnet", "Error sending full message to channel: {:?}", e);
 		}

@@ -402,7 +402,7 @@ pub fn spawn_workers<T: Configuration>(
 					}
 				},
 				Poll::Ready(MixnetEvent::Disconnected(disconnected)) => {
-					for (network_id, mix_id) in disconnected {
+					for (network_id, mix_id, _until) in disconnected {
 						// when keep_connection_alive is true TODO factor the decrease and
 						// increase code
 						log::trace!(target: "mixnet_test", "{} Disconnected  {}/{:?}", p, handshake_done.len(), target_peers);

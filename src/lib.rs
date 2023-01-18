@@ -107,5 +107,5 @@ pub enum MixnetToBehaviorEvent {
 	/// Peer connection dropped, sending info to behaviour for
 	/// cleanup.
 	/// Possibly attempt new connection.
-	Disconnected(NetworkId),
+	Disconnected(NetworkId, Option<std::time::Instant>),
 }
