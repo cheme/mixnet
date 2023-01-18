@@ -433,7 +433,7 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			peer_pub_key.as_ref(),
 			&send_options.num_hop,
 			chunks.len(),
-			false,
+			None,
 			is_external,
 		)?;
 
@@ -444,19 +444,24 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 			} else {
 				peer_id.as_ref()
 			};
+			let first_query_peer = paths
+				.last()
+				.and_then(|path| path.first())
+				.map(|peer_id| (&peer_id.0, Some(&peer_id.1)));
 			let paths = self
 				.random_paths(
 					peer_id,
 					peer_pub_key.as_ref(),
 					&send_options.num_hop,
 					1,
-					true,
+					first_query_peer,
 					is_external,
 				)?
 				.remove(0);
 			let first_node = paths[0].0;
 			let paths: Vec<_> = paths
 				.into_iter()
+				.chain(is_external.then(|| (self.local_id, self.public)).into_iter())
 				.map(|(id, public_key)| sphinx::PathHop { id, public_key })
 				.collect();
 			Some((first_node, paths))
@@ -636,12 +641,14 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		recipient_key: Option<&MixPublicKey>,
 		num_hops: &Option<usize>,
 		count: usize,
-		is_surb: bool,
+		is_surb: Option<(&MixnetId, Option<&MixPublicKey>)>,
 		is_external: bool,
 	) -> Result<Vec<Vec<(MixnetId, MixPublicKey)>>, Error> {
-		let (start, recipient) = if is_surb {
+		let (start, recipient) = if is_surb.is_some() {
 			if let Some(recipient) = recipient {
-				(Some((recipient, recipient_key)), Some((&self.local_id, Some(&self.public))))
+				let dest =
+					if is_external { is_surb } else { Some((&self.local_id, Some(&self.public))) };
+				(Some((recipient, recipient_key)), dest)
 			} else {
 				// no recipient for a surb could be unreachable too.
 				return Err(Error::NoPath(None))
@@ -665,7 +672,13 @@ impl<T: Configuration, C: Connection> Mixnet<T, C> {
 		}
 
 		if let Some(start) = start {
-			self.topology.random_path(start, recipient, count, num_hops)
+			let mut paths = self.topology.random_path(start, recipient, count, num_hops)?;
+			if is_external && is_surb.is_some() {
+				for path in paths.iter_mut() {
+					path.push((self.local_id, self.public));
+				}
+			}
+			Ok(paths)
 		} else {
 			let firsts = self.topology.first_hop_nodes_external(
 				&self.local_id,

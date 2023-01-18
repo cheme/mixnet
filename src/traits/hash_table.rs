@@ -23,7 +23,7 @@
 
 use crate::{
 	traits::{NewRoutingSet, Topology},
-	Error, MixPublicKey, MixnetId, NetworkId, PeerCount,
+	Error, MixPublicKey, MixnetId, NetworkId,
 };
 use log::{debug, error, trace};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -59,20 +59,6 @@ pub trait Configuration {
 	/// Percent of additional bandwidth allowed for external
 	/// node message reception.
 	const EXTERNAL_BANDWIDTH: (usize, usize);
-
-	/// Default parameters for the topology.
-	const DEFAULT_PARAMETERS: Parameters;
-}
-
-/// Configuration parameters for topology.
-#[derive(Clone)]
-pub struct Parameters {
-	// limit to external connection
-	pub max_external: Option<usize>,
-
-	// When running as external number of consumer connection
-	// with validator to try to maintain.
-	pub number_consumer_connection: Option<usize>,
 }
 
 pub trait TableVersion: Default + Clone + Eq + PartialEq + Ord + std::fmt::Debug + 'static {
@@ -119,8 +105,6 @@ pub struct TopologyHashTable<C: Configuration> {
 	routing_peers: BTreeMap<MixnetId, RoutingTable>,
 
 	routing_peers_network: BTreeMap<NetworkId, MixnetId>,
-
-	params: Parameters,
 
 	// all path of a given size.
 	// on every change to routing table this is cleared TODO make change synchronously to
@@ -277,7 +261,7 @@ impl<C: Configuration> Topology for TopologyHashTable<C> {
 
 impl<C: Configuration> TopologyHashTable<C> {
 	/// Instantiate a new topology.
-	pub fn new(local_id: MixnetId, node_public_key: MixPublicKey, params: Parameters) -> Self {
+	pub fn new(local_id: MixnetId, node_public_key: MixPublicKey) -> Self {
 		let routing_table = RoutingTable {
 			public_key: node_public_key,
 			connected_to: BTreeSet::new(),
@@ -297,7 +281,6 @@ impl<C: Configuration> TopologyHashTable<C> {
 			routing_table,
 			paths: Default::default(),
 			paths_depth: 0,
-			params,
 			should_connect_to: Default::default(),
 			_ph: Default::default(),
 		}
