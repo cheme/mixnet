@@ -21,6 +21,7 @@
 //! Mixnet topology interface.
 
 pub mod hash_table;
+pub mod set;
 
 use crate::{Error, MixPublicKey, MixnetId, NetworkId, PeerCount, WindowStats};
 use ambassador::delegatable_trait;
@@ -84,7 +85,7 @@ pub trait Topology: Sized {
 	/// transaction into the block.
 	/// `recipient_node` is part of the returned path, not `start_node`.
 	/// Error when no recipient is reachable.
-	fn random_path(
+	fn random_path( // TODO random_paths
 		&mut self,
 		start_node: (&MixnetId, Option<&MixPublicKey>),
 		recipient_node: Option<(&MixnetId, Option<&MixPublicKey>)>,
