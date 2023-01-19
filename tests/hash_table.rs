@@ -30,9 +30,7 @@ use libp2p_core::PeerId;
 use mixnet::{
 	ambassador_impl_Topology,
 	traits::{
-		hash_table::{
-			Configuration as TopologyConfig, Parameters, RoutingTable, TopologyHashTable,
-		},
+		hash_table::{Configuration as TopologyConfig, RoutingTable, TopologyHashTable},
 		NewRoutingSet, Topology,
 	},
 	Error, MixPublicKey, MixSecretKey, MixnetId, NetworkId, PeerCount, SendOptions,
@@ -58,9 +56,6 @@ impl TopologyConfig for NotDistributed {
 	const NUMBER_CONNECTED_BACKWARD: usize = Self::NUMBER_CONNECTED_FORWARD - 2;
 
 	const EXTERNAL_BANDWIDTH: (usize, usize) = (1, 10);
-
-	const DEFAULT_PARAMETERS: Parameters =
-		Parameters { max_external: Some(1), number_consumer_connection: Some(3) };
 }
 
 #[derive(Delegate)]
@@ -127,11 +122,7 @@ fn test_messages(conf: TestConfig) {
 	                      nodes: &[(MixnetId, MixPublicKey, NetworkId)],
 	                      _secrets: &[(MixSecretKey, ed25519_zebra::SigningKey)],
 	                      _config: &mixnet::Config| {
-		let mut topo = TopologyHashTable::new(
-			nodes[p].0,
-			nodes[p].1,
-			NotDistributed::DEFAULT_PARAMETERS.clone(),
-		);
+		let mut topo = TopologyHashTable::new(nodes[p].0, nodes[p].1);
 		topo.handle_new_routing_set(NewRoutingSet { peers: &nodes[..num_peers] });
 
 		topo.into()
@@ -341,11 +332,7 @@ fn test_change_routing_set(conf: TestConfig) {
 				log::trace!(target: "mixnet_test", "\t {:?}", p.0);
 			}
 		}
-		let mut topo = TopologyHashTable::new(
-			nodes[p].0,
-			nodes[p].1,
-			NotDistributed::DEFAULT_PARAMETERS.clone(),
-		);
+		let mut topo = TopologyHashTable::new(nodes[p].0, nodes[p].1);
 		topo.handle_new_routing_set(NewRoutingSet { peers: &nodes[set_topo.clone()] });
 
 		NotDistributed { inner: topo }

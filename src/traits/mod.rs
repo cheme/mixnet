@@ -85,7 +85,8 @@ pub trait Topology: Sized {
 	/// transaction into the block.
 	/// `recipient_node` is part of the returned path, not `start_node`.
 	/// Error when no recipient is reachable.
-	fn random_path( // TODO random_paths
+	fn random_path(
+		// TODO random_paths
 		&mut self,
 		start_node: (&MixnetId, Option<&MixPublicKey>),
 		recipient_node: Option<(&MixnetId, Option<&MixPublicKey>)>,

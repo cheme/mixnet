@@ -70,7 +70,6 @@ fn hash(iv: &[u8], data: &[u8]) -> MessageHash {
 pub struct Fragment {
 	buf: Vec<u8>,
 	index: u32,
-	with_surb: bool,
 }
 
 impl Fragment {
@@ -79,7 +78,7 @@ impl Fragment {
 		let mut buf = vec![0; FRAGMENT_PACKET_SIZE];
 		buf[0..4].copy_from_slice(&COVER_TAG[..]);
 		rng.fill_bytes(&mut buf[4..]);
-		Fragment { buf, index: 0, with_surb: false }
+		Fragment { buf, index: 0 }
 	}
 
 	pub fn create(
@@ -107,7 +106,7 @@ impl Fragment {
 			buf.len() == FRAGMENT_PACKET_SIZE
 		});
 
-		Fragment { buf, index, with_surb }
+		Fragment { buf, index }
 	}
 
 	fn hash(&self) -> MessageHash {
@@ -138,7 +137,7 @@ impl Fragment {
 			}
 		}
 
-		Ok(Some(Fragment { buf: fragment, index, with_surb }))
+		Ok(Some(Fragment { buf: fragment, index }))
 	}
 
 	pub fn iv(&self) -> Option<Box<[u8; 32]>> {
@@ -263,7 +262,7 @@ impl MessageCollection {
 		let expires_ix = self.0.next_inserted_entry();
 		match self.0.entry(fragment.hash()) {
 			Entry::Occupied(mut e) => {
-				let with_surb = fragment.with_surb;
+				let with_surb = kind.with_surb();
 				let index = fragment.index;
 				if index == 0 {
 					e.get_mut().0.target_len = fragment.message_len();
